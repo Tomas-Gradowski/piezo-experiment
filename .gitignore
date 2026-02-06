@@ -1,0 +1,19 @@
+# data
+runs/*
+!runs/.gitkeep
+
+# python junk
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# mac/windows junk
+.DS_Store
+Thumbs.db
+
+# plots/output
+*.png
+*.pdf
+*.svg
