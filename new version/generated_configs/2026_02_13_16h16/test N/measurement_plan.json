@@ -1,0 +1,615 @@
+{
+  "frequencies_hz": [
+    10.0,
+    505.0,
+    1000.0
+  ],
+  "rbox": {
+    "mode": "dr08",
+    "requested_ohm": [
+      1000.0,
+      3250.0,
+      5500.0,
+      7750.0,
+      10000.0
+    ],
+    "entries": [
+      {
+        "requested_ohm": 1000.0,
+        "digits": [
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "rbox_ohm": 1000.0
+      },
+      {
+        "requested_ohm": 3250.0,
+        "digits": [
+          0,
+          0,
+          0,
+          3,
+          2,
+          5,
+          0,
+          0
+        ],
+        "rbox_ohm": 3250.0
+      },
+      {
+        "requested_ohm": 5500.0,
+        "digits": [
+          0,
+          0,
+          0,
+          5,
+          5,
+          0,
+          0,
+          0
+        ],
+        "rbox_ohm": 5500.0
+      },
+      {
+        "requested_ohm": 7750.0,
+        "digits": [
+          0,
+          0,
+          0,
+          7,
+          7,
+          5,
+          0,
+          0
+        ],
+        "rbox_ohm": 7750.0
+      },
+      {
+        "requested_ohm": 10000.0,
+        "digits": [
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "rbox_ohm": 10000.0
+      }
+    ],
+    "unique_rbox_ohm": [
+      1000.0,
+      3250.0,
+      5500.0,
+      7750.0,
+      10000.0
+    ]
+  },
+  "resistances_total_ohm": [
+    999.0009990009991,
+    3239.4717169200094,
+    5469.915464942815,
+    7690.39940461424,
+    9900.990099009901
+  ],
+  "grid_points": [
+    {
+      "index": 0,
+      "r_index": 0,
+      "f_index": 0,
+      "freq_hz": 10.0,
+      "rbox_ohm": 1000.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 1000.0,
+      "total_r_ohm": 999.0009990009991,
+      "decimation": 8192,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 8192",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 1,
+      "r_index": 0,
+      "f_index": 1,
+      "freq_hz": 505.0,
+      "rbox_ohm": 1000.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 1000.0,
+      "total_r_ohm": 999.0009990009991,
+      "decimation": 128,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 128",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 2,
+      "r_index": 0,
+      "f_index": 2,
+      "freq_hz": 1000.0,
+      "rbox_ohm": 1000.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 1000.0,
+      "total_r_ohm": 999.0009990009991,
+      "decimation": 64,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 64",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 3,
+      "r_index": 1,
+      "f_index": 0,
+      "freq_hz": 10.0,
+      "rbox_ohm": 3250.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        3,
+        2,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 3250.0,
+      "total_r_ohm": 3239.4717169200094,
+      "decimation": 8192,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 8192",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 4,
+      "r_index": 1,
+      "f_index": 1,
+      "freq_hz": 505.0,
+      "rbox_ohm": 3250.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        3,
+        2,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 3250.0,
+      "total_r_ohm": 3239.4717169200094,
+      "decimation": 128,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 128",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 5,
+      "r_index": 1,
+      "f_index": 2,
+      "freq_hz": 1000.0,
+      "rbox_ohm": 3250.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        3,
+        2,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 3250.0,
+      "total_r_ohm": 3239.4717169200094,
+      "decimation": 64,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 64",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 6,
+      "r_index": 2,
+      "f_index": 0,
+      "freq_hz": 10.0,
+      "rbox_ohm": 5500.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        5,
+        5,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 5500.0,
+      "total_r_ohm": 5469.915464942815,
+      "decimation": 8192,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 8192",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 7,
+      "r_index": 2,
+      "f_index": 1,
+      "freq_hz": 505.0,
+      "rbox_ohm": 5500.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        5,
+        5,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 5500.0,
+      "total_r_ohm": 5469.915464942815,
+      "decimation": 128,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 128",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 8,
+      "r_index": 2,
+      "f_index": 2,
+      "freq_hz": 1000.0,
+      "rbox_ohm": 5500.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        5,
+        5,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 5500.0,
+      "total_r_ohm": 5469.915464942815,
+      "decimation": 64,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 64",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 9,
+      "r_index": 3,
+      "f_index": 0,
+      "freq_hz": 10.0,
+      "rbox_ohm": 7750.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        7,
+        7,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 7750.0,
+      "total_r_ohm": 7690.39940461424,
+      "decimation": 8192,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 8192",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 10,
+      "r_index": 3,
+      "f_index": 1,
+      "freq_hz": 505.0,
+      "rbox_ohm": 7750.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        7,
+        7,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 7750.0,
+      "total_r_ohm": 7690.39940461424,
+      "decimation": 128,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 128",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 11,
+      "r_index": 3,
+      "f_index": 2,
+      "freq_hz": 1000.0,
+      "rbox_ohm": 7750.0,
+      "rbox_digits": [
+        0,
+        0,
+        0,
+        7,
+        7,
+        5,
+        0,
+        0
+      ],
+      "requested_r_ohm": 7750.0,
+      "total_r_ohm": 7690.39940461424,
+      "decimation": 64,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 64",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 12,
+      "r_index": 4,
+      "f_index": 0,
+      "freq_hz": 10.0,
+      "rbox_ohm": 10000.0,
+      "rbox_digits": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 10000.0,
+      "total_r_ohm": 9900.990099009901,
+      "decimation": 8192,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 8192",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 13,
+      "r_index": 4,
+      "f_index": 1,
+      "freq_hz": 505.0,
+      "rbox_ohm": 10000.0,
+      "rbox_digits": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 10000.0,
+      "total_r_ohm": 9900.990099009901,
+      "decimation": 128,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 128",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    },
+    {
+      "index": 14,
+      "r_index": 4,
+      "f_index": 2,
+      "freq_hz": 1000.0,
+      "rbox_ohm": 10000.0,
+      "rbox_digits": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "requested_r_ohm": 10000.0,
+      "total_r_ohm": 9900.990099009901,
+      "decimation": 64,
+      "pitaya_setup": [
+        "ACQ:RST",
+        "ACQ:DATA:UNITS VOLTS",
+        "ACQ:SOUR1:GAIN HV",
+        "ACQ:SOUR2:GAIN HV",
+        "ACQ:DEC 64",
+        "ACQ:TRIG:DLY 8192",
+        "ACQ:START",
+        "ACQ:TRIG NOW"
+      ],
+      "pitaya_queries": [
+        "ACQ:SOUR1:DATA?",
+        "ACQ:SOUR2:DATA?"
+      ]
+    }
+  ]
+}
