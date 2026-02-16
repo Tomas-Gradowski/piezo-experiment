@@ -17,3 +17,13 @@ Thumbs.db
 *.png
 *.pdf
 *.svg
+
+# Generated experiment outputs
+new version/generated_configs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

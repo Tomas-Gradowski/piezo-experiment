@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from devices.pitaya_scpi import PitayaSCPI
-from devices.epos_driver import EposDriver, EposConfig
+from devices.epos_driver import EposDriver, EposConfig, Direction 
 
 
 # -----------------------------
@@ -124,15 +124,19 @@ def execute_point(
     extra_wait_s: float,
     dry_run: bool,
     meta: Optional[Dict[str, Any]] = None,
+    rep_index: int = 0,
+    use_pitaya: bool = True,
 ) -> ExecResult:
 
     idx = int(point["index"])
     dec = int(point["decimation"])
-    out_csv = csv_dir / f"point_{idx:06d}.csv"
+    out_csv = csv_dir / f"point_{idx:06d}_rep{rep_index}.csv"
 
     print(f"\n--- Executing point {idx} ---")
     print(f"Decimation = {dec}")
-
+    if not use_pitaya:
+        print("Pitaya disabled: skipping acquisition")
+        return ExecResult(index=idx, ok=True, error=None, out_csv=None, n_ch1=0, n_ch2=0)
     if dry_run:
         print("DRY RUN: Skipping hardware communication.")
         print("Would send setup commands:")
@@ -205,7 +209,15 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--use-epos", action="store_true", help="Enable EPOS motor control")
     ap.add_argument("--epos-lib", default="/home/tomas/thesis/epos/EPOS-Linux-Library-En/EPOS_Linux_Library/lib/intel/x86_64/libEposCmd.so.6.8.1.0")
+    
+    ap.add_argument("--no-pitaya", action="store_true", help="Force-disable Pitaya acquisition (EPOS-only run)")
 
+    # Manual EPOS jog test (does not run the plan loop)
+    ap.add_argument("--epos-jog", action="store_true", help="Run a manual EPOS jog test then exit")
+    ap.add_argument("--epos-jog-dir", choices=["cw", "ccw"], default="cw", help="Direction for manual jog")
+    ap.add_argument("--epos-jog-rpm", type=int, default=30, help="Output rpm for manual jog")
+    ap.add_argument("--epos-jog-seconds", type=float, default=2.0, help="How long to jog")
+    ap.add_argument("--rpm-limit", type=int, default=1000, help="Hard safety cap ")
     return ap.parse_args()
 
 
@@ -216,11 +228,19 @@ def main() -> None:
     cfg = load_json(run_dir / "experiment_config.json")
     plan = load_json(run_dir / "measurement_plan.json")
 
-    pitaya_cfg = cfg["pitaya"]
-    host = pitaya_cfg["host"]
-    port = int(pitaya_cfg["port"])
-    fs_hz = float(pitaya_cfg["fs_hz"])
-    n_samples = int(pitaya_cfg["n_samples"])
+    pitaya_cfg = cfg.get("pitaya", {})
+    epos_cfg = cfg.get("epos", {})
+
+    # Enable flags (cfg + CLI)
+    use_pitaya = bool(pitaya_cfg.get("enabled", True)) and (not args.no_pitaya)
+    use_epos_cfg = bool(epos_cfg.get("enabled", False))
+    use_epos = bool(args.use_epos) and use_epos_cfg
+
+    # Pitaya parameters (safe defaults)
+    host = pitaya_cfg.get("host", "rp-f06549.local")
+    port = int(pitaya_cfg.get("port", 5000))
+    fs_hz = float(pitaya_cfg.get("fs_hz", 125e6))
+    n_samples = int(pitaya_cfg.get("n_samples", 16384))
 
     csv_dir = run_dir / args.csv_dirname
     csv_dir.mkdir(parents=True, exist_ok=True)
@@ -234,28 +254,69 @@ def main() -> None:
     if args.points is not None:
         subset = subset[: max(0, int(args.points))]
 
-    # Optional DR08 info
-    r_entries = plan.get("rbox", {}).get("entries", [])
+    # DR08 prompt tracking
     current_r_index: Optional[int] = None
-    current_r_entry: Optional[Dict[str, Any]] = None
 
-    motor_current = None
-    motor_rpm = None
-    epos: Optional[EposDriver] = None
+    # EPOS run parameters (from cfg["epos"])
+    repetitions = int(cfg.get("repetitions", 1))
+    periods = float(cfg.get("periods", 10.0))
+
+    epos_direction = str(epos_cfg.get("direction", "cw"))
+    epos_alternate = bool(epos_cfg.get("alternate", False))
+    epos_rest_s = float(epos_cfg.get("rest_s", 0.0))
+    epos_rpm_override = int(epos_cfg.get("rpm_override", 0))
 
     results: List[ExecResult] = []
     t0 = time.perf_counter()
 
     pitaya = PitayaSCPI(host, port, timeout=args.timeout)
+    epos: Optional[EposDriver] = None
 
     try:
-        if not args.dry_run:
+        # --- Open Pitaya
+        if use_pitaya and (not args.dry_run):
             pitaya.open()
+        else:
+            print("Pitaya is disabled or dry-run: not opening Red Pitaya.")
 
-        if args.use_epos and not args.dry_run:
-            epos = EposDriver(EposConfig(lib_path=args.epos_lib))
+        # --- Open EPOS (prefer config JSON for lib_path)
+        if use_epos and (not args.dry_run):
+            lib_path = epos_cfg.get("lib_path", args.epos_lib)
+            epos = EposDriver(EposConfig(
+                lib_path=lib_path,
+                node_id=int(epos_cfg.get("node_id", 1)),
+                gear_reduction=int(epos_cfg.get("gear_reduction", 18)),
+                max_rpm=int(epos_cfg.get("max_rpm", 8)),
+            ))
+            print("Opening EPOS...")
             epos.open()
+        else:
+            if args.use_epos:
+                print("EPOS requested but disabled in config or dry-run: not opening EPOS.")
 
+        # --- Manual EPOS jog mode (test motor without experiment)
+        if args.epos_jog:
+            jog_rpm = max(0, min(int(args.epos_jog_rpm), int(args.rpm_limit)))
+            if not args.use_epos:
+                print("ERROR: --epos-jog requires --use-epos")
+                return
+
+            if args.dry_run:
+                print(f"[EPOS dry-run jog] dir={args.epos_jog_dir} rpm_out={jog_rpm} seconds={args.epos_jog_seconds}")
+                return
+
+            if epos is None:
+                raise RuntimeError("EPOS not opened (is it enabled in experiment_config.json and --use-epos passed?)")
+
+            d = Direction(args.epos_jog_dir)
+            print(f"[EPOS jog] START dir={d.value} rpm_out={jog_rpm} seconds={args.epos_jog_seconds}")
+            epos.jog_start(rpm_output=jog_rpm, direction=d)
+            time.sleep(float(args.epos_jog_seconds))
+            epos.jog_stop()
+            print("[EPOS jog] STOP")
+            return
+
+        # --- Main run loop
         for gp in subset:
             r_idx = gp.get("r_index", None)
 
@@ -268,50 +329,86 @@ def main() -> None:
                 print(format_digits(gp["rbox_digits"]))
                 print("Set the DR08 now, then press Enter to continue...")
                 input()
-            if epos is not None:
-                motor_current = epos.get_current_mA()
 
-            # metadata per point (goes into commented header)
-            meta = {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "index": gp.get("index"),
-                "r_index": gp.get("r_index"),
-                "f_index": gp.get("f_index"),
-                "freq_hz": gp.get("freq_hz"),
-                "decimation": gp.get("decimation"),
-                "motor_current_mA": motor_current,
-            }
-            if current_r_entry is not None:
-                meta.update({
-                    "requested_r_ohm": current_r_entry.get("requested_ohm"),
-                    "rbox_ohm": current_r_entry.get("rbox_ohm"),
-                    "rbox_digits": current_r_entry.get("digits"),
-                })
+            for rep in range(repetitions):
+                # --- EPOS motion (before acquisition)
+                motor_current = None
+                if use_epos:
+                    d_str = epos_direction
+                    if epos_alternate and (rep % 2 == 1):
+                        d_str = "ccw" if epos_direction == "cw" else "cw"
 
-            res = execute_point(
-                pitaya=pitaya,
-                point=gp,
-                fs_hz=fs_hz,
-                n_samples=n_samples,
-                csv_dir=csv_dir,
-                no_sleep=args.no_sleep,
-                extra_wait_s=args.extra_wait,
-                dry_run=args.dry_run,
-                meta=meta,
-            )
-            results.append(res)
+                    motor_hz = float(gp["motor_hz"])
+                    rpm_out_plan = int(gp["rpm_out"])
 
-            if res.ok:
-                print(f"Saved {res.out_csv} (n={res.n_ch1})")
-            else:
-                print(f"FAIL point {res.index}: {res.error}")
-                if args.fail_fast:
-                    break
+                    dur_s = periods / motor_hz
+                    rpm_out = epos_rpm_override if epos_rpm_override > 0 else rpm_out_plan
+                    rpm_out = max(0,min(rpm_out, int(args.rpm_limit)))
+
+                    if args.dry_run:
+                        print(f"[EPOS dry-run] point={gp['index']} rep={rep} dir={d_str} rpm_out={rpm_out} duration_s={dur_s:.3f}")
+                    else:
+                        assert epos is not None
+                        d = Direction(d_str)
+                        print(f"[EPOS] point={gp['index']} rep={rep} dir={d.value} rpm_out={rpm_out} duration_s={dur_s:.3f}")
+                        epos.move_for_time(duration_s=dur_s, rpm_output=rpm_out, direction=d)
+                        motor_current = epos.get_current_mA()
+                        vel = epos.get_velocity_rpm()
+                        print(f"[EPOS] current_mA={motor_current} vel_rpm={vel}")
+                        if epos_rest_s > 0:
+                            time.sleep(epos_rest_s)
+
+                # --- Metadata per repetition
+                meta = {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "index": gp.get("index"),
+                    "rep": rep,
+                    "r_index": gp.get("r_index"),
+                    "f_index": gp.get("f_index"),
+                    "motor_hz": gp.get("motor_hz"),
+                    "signal_hz": gp.get("signal_hz"),
+                    "decimation": gp.get("decimation"),
+                    "motor_current_mA": motor_current,
+                }
+
+                # --- Pitaya acquisition per repetition (or skip)
+                res = execute_point(
+                    pitaya=pitaya,
+                    point=gp,
+                    fs_hz=fs_hz,
+                    n_samples=n_samples,
+                    csv_dir=csv_dir,
+                    no_sleep=args.no_sleep,
+                    extra_wait_s=args.extra_wait,
+                    dry_run=args.dry_run,
+                    meta=meta,
+                    rep_index=rep,
+                    use_pitaya=use_pitaya,
+                )
+                results.append(res)
+
+                if res.ok:
+                    if res.out_csv:
+                        print(f"Saved {res.out_csv} (n={res.n_ch1})")
+                    else:
+                        print("OK (no CSV written)")
+                else:
+                    print(f"FAIL point {res.index}: {res.error}")
+                    if args.fail_fast:
+                        break
+
+            if args.fail_fast and results and (not results[-1].ok):
+                break
 
     finally:
         if epos is not None:
+            try:
+                epos.jog_stop()
+            except Exception:
+                pass
             epos.close()
-        if not args.dry_run:
+
+        if (not args.dry_run) and use_pitaya:
             pitaya.close()
 
     dt = time.perf_counter() - t0
@@ -329,7 +426,6 @@ def main() -> None:
     }
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"\nWrote manifest: {run_dir / 'run_manifest.json'}")
-
 
 if __name__ == "__main__":
     main()
