@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import queue
@@ -93,12 +94,141 @@ class App(tk.Tk):
         If your executor doesn't have it yet, add it (see note at bottom).
       - gen_config.py supports: --epos-max-rpm and --signal_hz_multiplier (already in your code)
     """
+    def _set_status(self, text: str, kind: str = "idle") -> None:
+        """
+        kind: idle | running | wait | stop
+        """
+        self.v_status.set(text)
+        style_map = {
+            "idle": "Status.Idle.TLabel",
+            "running": "Status.Running.TLabel",
+            "wait": "Status.Wait.TLabel",
+            "stop": "Status.Stop.TLabel",
+        }
+        self.lbl_status.configure(style=style_map.get(kind, "Status.Idle.TLabel"))
+
+    def _reset_progress(self, total_points: int) -> None:
+        self.pb.configure(mode="determinate", maximum=max(1, int(total_points)))
+        self.v_progress.set(0)
+
+    def _advance_progress_from_log(self, chunk: str) -> None:
+        # Parse lines like: "--- Executing point 0 ---"
+        import re
+        m = re.search(r"--- Executing point (\d+)", chunk)
+        if m:
+            i = int(m.group(1)) + 1  # show 1-based progress
+            self.v_progress.set(i)
+
+
+        # --- DR08 parsing (executor prompt) ---
+
+        # Example:
+
+        #   Set DR08 to R ≈ 1000.0 Ω (requested 1000.0 Ω)
+
+        #   Digits [1M,100k,10k,1k,100,10,1,0.1]:
+
+        #   0 0 0 1 0 0 0 0
+
+        mR = re.search(r"Set DR08 to R\s*≈\s*([0-9\.]+)\s*Ω", chunk)
+        if mR:
+            self.v_dr08_r.set(f"R ≈ {mR.group(1)} Ω")
+
+        mH = re.search(r"Digits \[([^\]]+)\]", chunk)
+        if mH:
+            hdr = [h.strip() for h in mH.group(1).split(",")]
+            if len(hdr) == 8:
+                self._dr08_header = hdr
+
+        if self._dr08_header:
+            for line in chunk.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if re.fullmatch(r"[0-9\s]+", s):
+                    parts = [p for p in s.split() if p.isdigit()]
+                    if len(parts) == 8:
+                        digits = [int(p) for p in parts]
+                        for j, d in enumerate(digits):
+                            self.v_dr08_digits[j].set(str(d))
+
+                        if self._dr08_last is None:
+                            self._dr08_last = digits
+                            for lbl in getattr(self, "_dr08_digit_labels", []):
+                                lbl.configure(style="DR08.Digit.TLabel")
+                        else:
+                            for j, lbl in enumerate(getattr(self, "_dr08_digit_labels", [])):
+                                if digits[j] != self._dr08_last[j]:
+                                    lbl.configure(style="DR08.DigitChanged.TLabel")
+                                else:
+                                    lbl.configure(style="DR08.Digit.TLabel")
+                            self._dr08_last = digits
+
+                        self._dr08_header = None
+                        break
+
+        # When executor waits for "press Enter"
+        if "press Enter to continue" in chunk or "press Enter" in chunk:
+            self.btn_continue.configure(state="normal")
+            self._set_status("WAITING: press Enter to continue", "wait")
     def _apply_styles(self) -> None:
         style = ttk.Style(self)
 
         # Use a theme that respects style colors better than default on many Linux setups
         try:
             style.theme_use("clam")
+            # --- Dark inputs: Entry + Combobox ---
+            style.configure(
+                "Dark.TEntry",
+                fieldbackground="#151826",
+                foreground="#e6e6e6",
+                background="#151826",
+                insertcolor="#e6e6e6",
+                bordercolor="#2a2f3a",
+                lightcolor="#2a2f3a",
+                darkcolor="#2a2f3a",
+            )
+
+            style.map(
+                "Dark.TEntry",
+                fieldbackground=[("focus", "#101426"), ("!focus", "#151826")],
+                bordercolor=[("focus", "#4c73ff"), ("!focus", "#2a2f3a")],
+            )
+
+            style.configure(
+                "Dark.TCombobox",
+                fieldbackground="#151826",
+                foreground="#e6e6e6",
+                background="#151826",
+                arrowcolor="#e6e6e6",
+                bordercolor="#2a2f3a",
+            )
+
+            style.map(
+                "Dark.TCombobox",
+                fieldbackground=[("readonly", "#151826"), ("focus", "#101426"), ("!focus", "#151826")],
+                foreground=[("readonly", "#e6e6e6"), ("!readonly", "#e6e6e6")],
+                bordercolor=[("focus", "#4c73ff"), ("!focus", "#2a2f3a")],
+            )
+            # --- Dark radiobuttons ---
+            style.configure(
+                "Dark.TRadiobutton",
+                background="#0f111a",
+                foreground="#e6e6e6",
+                padding=(6, 4),
+            )
+
+            # Make active/pressed states readable
+            style.map(
+                "Dark.TRadiobutton",
+                foreground=[("disabled", "#7a8194"), ("active", "#ffffff"), ("!disabled", "#e6e6e6")],
+                background=[("active", "#0f111a"), ("!active", "#0f111a")],
+            )
+            # The combobox dropdown is a Tk listbox, not ttk -> style via option_add
+            self.option_add("*TCombobox*Listbox.background", "#0b0d14")
+            self.option_add("*TCombobox*Listbox.foreground", "#d7dce5")
+            self.option_add("*TCombobox*Listbox.selectBackground", "#4c73ff")
+            self.option_add("*TCombobox*Listbox.selectForeground", "#0b0d14")
         except tk.TclError:
             pass
 
@@ -144,9 +274,49 @@ class App(tk.Tk):
         map_button("Run.TButton",      normal_bg="#1f8f4a", hover_bg="#24a855", pressed_bg="#1b7a40")
         map_button("Continue.TButton", normal_bg="#7ee08c", hover_bg="#8bf19a", pressed_bg="#6fd47f")
         map_button("Stop.TButton",     normal_bg="#c73737", hover_bg="#e04a4a", pressed_bg="#ab2f2f", fg="#1a0b0b")
-
-        # Optional: make Jog look “warning but safe”
         map_button("Jog.TButton",      normal_bg="#d7b84a", hover_bg="#e8ca57", pressed_bg="#b79b3e", fg="#1a1406")
+
+        # ----- Segmented mode selector (radiobuttons as pills) -----
+        style.configure(
+            "Mode.TButton",
+            padding=(10, 8),
+            relief="flat",
+            borderwidth=1,
+            background="#151826",
+            foreground="#d7dce5",
+        )
+        style.map(
+            "Mode.TButton",
+            background=[
+        ("selected", "#4c73ff"),
+        ("active", "#20263a"),
+        ("!selected", "#151826"),
+            ],
+            foreground=[
+        ("selected", "#0b0d14"),
+        ("!selected", "#d7dce5"),
+            ],
+            bordercolor=[
+        ("selected", "#4c73ff"),
+        ("!selected", "#2a2f3a"),
+            ],
+        )
+
+        # ----- DR08 digit display -----
+        style.configure("DR08.Box.TFrame", background="#151826")
+        style.configure("DR08.Decade.TLabel", background="#151826", foreground="#9aa3b2", padding=(6, 2))
+        style.configure("DR08.Digit.TLabel", background="#151826", foreground="#e6e6e6", padding=(6, 6), font=("DejaVu Sans Mono", 12, "bold"))
+        style.configure("DR08.DigitChanged.TLabel", background="#151826", foreground="#4c73ff", padding=(6, 6), font=("DejaVu Sans Mono", 12, "bold"))
+        style.configure("DR08.R.TLabel", background="#151826", foreground="#e6e6e6", padding=(8, 6), font=("DejaVu Sans Mono", 11, "bold"))
+        # ----- Status pill -----
+        # You "color" the pill by switching styles on the same label.
+        style.configure("Status.Idle.TLabel",    background="#151826", foreground="#cfd6e6", padding=(10, 6))
+        style.configure("Status.Running.TLabel", background="#1f8f4a", foreground="#08140c", padding=(10, 6))
+        style.configure("Status.Wait.TLabel",    background="#7ee08c", foreground="#08140c", padding=(10, 6))
+        style.configure("Status.Stop.TLabel",    background="#c73737", foreground="#1a0b0b", padding=(10, 6))
+
+        # Progress bar
+        style.configure("Thin.Horizontal.TProgressbar", thickness=16)
     MODES = (
         ("Plan-only (simulate, no hardware)", "plan_only"),
         ("EPOS Safe Jog (motor only)", "epos_jog"),
@@ -160,7 +330,13 @@ class App(tk.Tk):
         self.geometry("1150x760")
         self._apply_styles()
         self.configure(background="#0f111a")
-
+        self.v_status = tk.StringVar(value="IDLE")
+        self.v_progress = tk.IntVar(value=0)
+        # DR08 display state (parsed from executor output)
+        self.v_dr08_r = tk.StringVar(value="R ≈ — Ω")
+        self.v_dr08_digits = [tk.StringVar(value="0") for _ in range(8)]
+        self._dr08_header: list[str] | None = None
+        self._dr08_last: list[int] | None = None
         self.log_q: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen | None = None
         self.worker: threading.Thread | None = None
@@ -172,13 +348,13 @@ class App(tk.Tk):
 
         def add_labeled(entry_row: int, label: str, var: tk.StringVar, width: int = 18):
             ttk.Label(frm, text=label).grid(row=entry_row, column=0, sticky="w")
-            e = ttk.Entry(frm, textvariable=var, width=width)
+            e = ttk.Entry(frm, textvariable=var, width=width, style="Dark.TEntry")
             e.grid(row=entry_row, column=1, sticky="w", padx=(8, 30))
             return e
 
         def add_combo(entry_row: int, label: str, var: tk.StringVar, values: tuple[str, ...], width: int = 16):
             ttk.Label(frm, text=label).grid(row=entry_row, column=0, sticky="w")
-            cb = ttk.Combobox(frm, textvariable=var, values=values, state="readonly", width=width)
+            cb = ttk.Combobox(frm, textvariable=var, values=values, state="readonly", width=width, style="Dark.TCombobox")
             cb.grid(row=entry_row, column=1, sticky="w", padx=(8, 30))
             return cb
 
@@ -231,15 +407,61 @@ class App(tk.Tk):
 
         add_labeled(r, "Run subdir", self.v_run_subdir); r += 1
 
+
+        # DR08 quick reference (updates live from executor output when prompting)
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+        r += 1
+        ttk.Label(frm, text="DR08 decade box (set these digits)", font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w")
+        r += 1
+
+        dr08_wrap = ttk.Frame(frm, style="DR08.Box.TFrame")
+        dr08_wrap.grid(row=r, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        r += 1
+
+        decades = ["1M", "100k", "10k", "1k", "100", "10", "1", "0.1"]
+        self._dr08_digit_labels = []
+
+        for j, dec in enumerate(decades):
+            ttk.Label(dr08_wrap, text=dec, style="DR08.Decade.TLabel").grid(row=0, column=j, padx=2, pady=(6, 0))
+
+        for j in range(8):
+            lbl = ttk.Label(dr08_wrap, textvariable=self.v_dr08_digits[j], style="DR08.Digit.TLabel")
+            lbl.grid(row=1, column=j, padx=2, pady=(0, 6))
+            self._dr08_digit_labels.append(lbl)
+
+        ttk.Label(frm, textvariable=self.v_dr08_r, style="DR08.R.TLabel").grid(row=r, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        r += 1
+
         # Right-side options panel
         opt = ttk.Frame(frm)
         opt.grid(row=0, column=2, rowspan=r, sticky="n", padx=(10, 0))
 
         ttk.Label(opt, text="Test Mode (single selector)", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-
         self.v_mode = tk.StringVar(value="plan_only")
+
+        # Mode selector as segmented buttons (more intuitive than tiny radio circles)
+        mode_box = ttk.Frame(opt)
+        mode_box.pack(anchor="w", pady=(6, 0), fill="x")
+
         for label, val in self.MODES:
-            ttk.Radiobutton(opt, text=label, variable=self.v_mode, value=val, command=self._on_mode_change).pack(anchor="w")
+            ttk.Radiobutton(
+        mode_box,
+        text=label,
+        variable=self.v_mode,
+        value=val,
+        command=self._on_mode_change,
+        
+        indicatoron=0,
+        selectcolor="#4c73ff",          # selected background-ish
+        fg="#d7dce5",
+        bg="#151826",
+        activeforeground="#ffffff",
+        activebackground="#20263a",
+        relief="flat",
+        bd=0,
+        padx=12,
+        pady=8,
+            ).pack(anchor="w", fill="x", pady=2)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
 
@@ -250,13 +472,13 @@ class App(tk.Tk):
         row_lim = ttk.Frame(opt)
         row_lim.pack(anchor="w", pady=(4, 0))
         ttk.Label(row_lim, text="RPM safety limit (executor)").pack(side="left")
-        ttk.Entry(row_lim, textvariable=self.v_rpm_limit, width=8).pack(side="left", padx=8)
+        ttk.Entry(row_lim, textvariable=self.v_rpm_limit, style="Dark.TEntry",width=8).pack(side="left", padx=8)
 
         self.v_points = tk.StringVar(value="3")
         row_pts = ttk.Frame(opt)
         row_pts.pack(anchor="w", pady=(4, 0))
         ttk.Label(row_pts, text="Plan points to run").pack(side="left")
-        ttk.Entry(row_pts, textvariable=self.v_points, width=8).pack(side="left", padx=8)
+        ttk.Entry(row_pts, textvariable=self.v_points, style="Dark.TEntry",width=8).pack(side="left", padx=8)
 
         self.v_prompt_rbox = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Prompt DR08 when resistance changes", variable=self.v_prompt_rbox).pack(anchor="w", pady=(6, 0))
@@ -274,7 +496,7 @@ class App(tk.Tk):
         row_sig = ttk.Frame(opt)
         row_sig.pack(anchor="w", pady=(6, 0))
         ttk.Label(row_sig, text="signal_hz_multiplier").pack(side="left")
-        ttk.Entry(row_sig, textvariable=self.v_signal_mult, width=8).pack(side="left", padx=8)
+        ttk.Entry(row_sig, style="Dark.TEntry",textvariable=self.v_signal_mult, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
 
@@ -285,24 +507,24 @@ class App(tk.Tk):
         row_ep.pack(anchor="w", pady=(4, 0))
         ttk.Label(row_ep, text="Direction").pack(side="left")
         ttk.Combobox(row_ep, textvariable=self.v_epos_direction, values=("cw", "ccw"),
-                     state="readonly", width=6).pack(side="left", padx=8)
+                     state="readonly",  style="Dark.TCombobox",width=6).pack(side="left", padx=8)
 
-        ttk.Checkbutton(opt, text="Alternate direction each repetition", variable=self.v_epos_alternate).pack(anchor="w")
+        ttk.Checkbutton(opt,text="Alternate direction each repetition", variable=self.v_epos_alternate).pack(anchor="w")
 
         row_rest = ttk.Frame(opt)
         row_rest.pack(anchor="w", pady=(6, 0))
         ttk.Label(row_rest, text="Rest seconds").pack(side="left")
-        ttk.Entry(row_rest, textvariable=self.v_epos_rest_s, width=8).pack(side="left", padx=8)
+        ttk.Entry(row_rest, style="Dark.TEntry",textvariable=self.v_epos_rest_s, width=8).pack(side="left", padx=8)
 
         row_rpm = ttk.Frame(opt)
         row_rpm.pack(anchor="w", pady=(6, 0))
         ttk.Label(row_rpm, text="RPM override (0=auto)").pack(side="left")
-        ttk.Entry(row_rpm, textvariable=self.v_epos_rpm_override, width=8).pack(side="left", padx=8)
+        ttk.Entry(row_rpm, style="Dark.TEntry",textvariable=self.v_epos_rpm_override, width=8).pack(side="left", padx=8)
 
         row_maxrpm = ttk.Frame(opt)
         row_maxrpm.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_maxrpm, text="EPOS max RPM cap (plan)").pack(side="left")
-        ttk.Entry(row_maxrpm, textvariable=self.v_epos_max_rpm, width=8).pack(side="left", padx=8)
+        ttk.Label(row_maxrpm, text="EPOS commanded RPM cap (plan)").pack(side="left")
+        ttk.Entry(row_maxrpm, style="Dark.TEntry",textvariable=self.v_epos_max_rpm, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
 
@@ -316,17 +538,17 @@ class App(tk.Tk):
         jog_row1.pack(anchor="w", pady=(4, 0))
         ttk.Label(jog_row1, text="Dir").pack(side="left")
         ttk.Combobox(jog_row1, textvariable=self.v_jog_dir, values=("cw", "ccw"),
-                     state="readonly", width=6).pack(side="left", padx=6)
+                     state="readonly", width=6, style="Dark.TCombobox").pack(side="left", padx=6)
 
         jog_row2 = ttk.Frame(opt)
         jog_row2.pack(anchor="w", pady=(4, 0))
         ttk.Label(jog_row2, text="RPM").pack(side="left")
-        ttk.Entry(jog_row2, textvariable=self.v_jog_rpm, width=8).pack(side="left", padx=6)
+        ttk.Entry(jog_row2, style="Dark.TEntry",textvariable=self.v_jog_rpm, width=8).pack(side="left", padx=6)
 
         jog_row3 = ttk.Frame(opt)
         jog_row3.pack(anchor="w", pady=(4, 0))
         ttk.Label(jog_row3, text="Seconds").pack(side="left")
-        ttk.Entry(jog_row3, textvariable=self.v_jog_seconds, width=8).pack(side="left", padx=6)
+        ttk.Entry(jog_row3, style="Dark.TEntry",textvariable=self.v_jog_seconds, width=8).pack(side="left", padx=6)
 
         self.btn_jog = ttk.Button(opt, text="Run Safe Jog (respects RPM limit)", command=self.on_jog, style="Jog.TButton")
         self.btn_jog.pack(anchor="w", pady=(6, 0))
@@ -342,6 +564,16 @@ class App(tk.Tk):
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.on_stop, state="disabled", style="Stop.TButton")
         self.btn_stop.pack(side="left", padx=10)
 
+        status = ttk.Frame(self, padding=(10, 10))
+        status.pack(fill="x")
+
+        ttk.Label(status, text="Status:", font=("TkDefaultFont", 10, "bold")).pack(side="left")
+
+        self.lbl_status = ttk.Label(status, textvariable=self.v_status, style="Status.Idle.TLabel")
+        self.lbl_status.pack(side="left", padx=8)
+
+        self.pb = ttk.Progressbar(status, variable=self.v_progress, style="Thin.Horizontal.TProgressbar")
+        self.pb.pack(side="right", fill="x", expand=True, padx=(10, 0))
         # Log terminal
         term = ttk.Frame(self, padding=10)
         term.pack(fill="both", expand=True)
@@ -359,7 +591,8 @@ class App(tk.Tk):
         )
         self.txt.configure(font=("DejaVu Sans Mono", 10))        
         self.txt.pack(fill="both", expand=True)
-
+        self.bind("<Escape>", lambda e: self.on_stop())
+        self.bind("<Return>", lambda e: self.on_continue())
 
         self.after(50, self._drain_log)
         self._on_mode_change()  # apply initial mode defaults
@@ -379,6 +612,7 @@ class App(tk.Tk):
         try:
             while True:
                 s = self.log_q.get_nowait()
+                self._advance_progress_from_log(s)
                 self.txt.insert("end", s)
                 self.txt.see("end")
         except queue.Empty:
@@ -537,7 +771,7 @@ class App(tk.Tk):
         2) send micro jog command (rpm=1, 0.01s) to force EPOS velocity reset
         """
         self.stop_flag.set()
-
+        self._set_status("STOPPING...", "stop")
         # 1) terminate executor process
         if self.proc and self.proc.poll() is None:
             try:
@@ -667,6 +901,8 @@ class App(tk.Tk):
 
             points_n = self._parse_int(self.v_points.get(), "Plan points", 1, 1_000_000)
             rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 1000)
+            self._reset_progress(points_n)
+            self._set_status("RUNNING", "running")
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
             return
@@ -792,6 +1028,10 @@ class App(tk.Tk):
                 self.btn_run.configure(state="normal")
                 self.btn_stop.configure(state="disabled")
                 self.btn_continue.configure(state="disabled")
+                if self.stop_flag.is_set():
+                    self._set_status("STOPPED", "stop")
+                else:
+                    self._set_status("IDLE", "idle")
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
