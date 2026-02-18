@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-
-import os
 import re
+import os
 import sys
 import time
 import queue
@@ -12,6 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+
+# Optional: plots and images
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+except Exception:
+    Figure = None
+    FigureCanvasTkAgg = None
+
 
 
 # -----------------------------
@@ -107,6 +117,233 @@ class App(tk.Tk):
         }
         self.lbl_status.configure(style=style_map.get(kind, "Status.Idle.TLabel"))
 
+
+
+    def _maybe_capture_paths(self, chunk: str) -> None:
+        """Listen to executor output to discover latest run-dir / CSV / table / plots."""
+        import re
+
+        # Executor prints this in ui4: [Using run-dir: ...]
+        m = re.search(r"\[Using run-dir: (.+?)\]", chunk)
+        if m:
+            p = Path(m.group(1)).expanduser()
+            if p.exists():
+                self.last_run_dir = p
+                # whenever run-dir updates, refresh plot list + attempt table reload
+                self.after(0, self._refresh_plots_list)
+                self.after(0, self._load_summary_table)
+
+        # Try to catch CSV saves from executor log
+        # common patterns: "Saving CSV to ..." or "Saved ...csv" or any ".csv" path
+        m2 = re.search(r"(/[^\s]+\.csv)", chunk)
+        if m2:
+            p = Path(m2.group(1))
+            if p.exists():
+                self.last_csv = p
+                self.after(0, self._kick_live_update)
+
+        # Data treatment might log where it wrote summary table
+        m3 = re.search(r"SUMMARY_CSV:\s*(/[^\s]+\.csv)", chunk)
+        if m3:
+            p = Path(m3.group(1))
+            if p.exists():
+                self.summary_csv = p
+                self.after(0, self._load_summary_table)
+
+    def _kick_live_update(self) -> None:
+        if self._live_update_job is None:
+            self._live_update_job = self.after(300, self._update_live_plot)
+
+    def _update_live_plot(self) -> None:
+        self._live_update_job = None
+        if self.last_csv is None or not self.last_csv.exists():
+            self.v_live_status.set("Waiting for first CSV…")
+            return
+
+        # Parse latest CSV and plot (time_s vs channels)
+        try:
+            import csv
+            times = []
+            ch1 = []
+            ch2 = []
+            with self.last_csv.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+                reader = csv.reader(f)
+                header = None
+                for row in reader:
+                    if not row:
+                        continue
+                    if row[0].startswith("#"):
+                        continue
+                    # find header
+                    if header is None:
+                        header = [c.strip() for c in row]
+                        continue
+                    # Expect at least 3 cols
+                    if len(row) < 3:
+                        continue
+                    try:
+                        t = float(row[0])
+                        a = float(row[1])
+                        b = float(row[2])
+                    except Exception:
+                        continue
+                    times.append(t); ch1.append(a); ch2.append(b)
+
+            self.v_live_status.set(f"Live: {self.last_csv.name}  ({len(times)} samples)")
+            if self.live_canvas is None or self.live_ax is None:
+                return
+
+            self.live_ax.clear()
+            if times:
+                self.live_ax.plot(times, ch1, label="ch1")
+                self.live_ax.plot(times, ch2, label="ch2")
+                self.live_ax.set_xlabel("time (s)")
+                self.live_ax.set_ylabel("signal")
+                self.live_ax.grid(True, alpha=0.25)
+                self.live_ax.legend(loc="best")
+            self.live_canvas.draw_idle()
+
+        except Exception as e:
+            self.v_live_status.set(f"Live plot error: {e}")
+
+        # keep updating while executor is running
+        if self.proc is not None and self.proc.poll() is None:
+            self._kick_live_update()
+
+    def _find_summary_csv(self) -> Path | None:
+        # Prefer explicit summary_csv captured from logs
+        if self.summary_csv is not None and self.summary_csv.exists():
+            return self.summary_csv
+        # Otherwise look in run-dir
+        if self.last_run_dir is None or not self.last_run_dir.exists():
+            return None
+        candidates = []
+        for pat in ("summary_table.csv", "results_table.csv", "*summary*.csv", "*table*.csv"):
+            candidates.extend(self.last_run_dir.rglob(pat))
+        candidates = [p for p in candidates if p.is_file()]
+        if not candidates:
+            return None
+        # newest
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def _load_summary_table(self) -> None:
+        p = self._find_summary_csv()
+        if p is None:
+            self.v_table_status.set("No summary table found yet.")
+            return
+        self.summary_csv = p
+        try:
+            import csv
+            with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            if not rows:
+                self.v_table_status.set(f"Empty table: {p.name}")
+                return
+            header = rows[0]
+            data = rows[1:]
+
+            # Configure columns
+            self.table.delete(*self.table.get_children())
+            self.table["columns"] = header
+            for col in header:
+                self.table.heading(col, text=col)
+                self.table.column(col, width=max(80, min(220, 12 * len(col))), anchor="w")
+
+            # Insert limited number for UI responsiveness
+            max_rows = 5000
+            for r in data[:max_rows]:
+                # pad / trim
+                r2 = (r + [""] * len(header))[: len(header)]
+                self.table.insert("", "end", values=r2)
+
+            extra = "" if len(data) <= max_rows else f" (showing first {max_rows}/{len(data)})"
+            self.v_table_status.set(f"Loaded: {p.name}{extra}")
+
+        except Exception as e:
+            self.v_table_status.set(f"Failed to load table: {e}")
+
+    def _export_table_csv(self) -> None:
+        if self.summary_csv is None or not self.summary_csv.exists():
+            messagebox.showwarning("No table", "No summary table to export yet.")
+            return
+        from tkinter import filedialog
+        dst = filedialog.asksaveasfilename(
+            title="Export table as CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        if not dst:
+            return
+        try:
+            Path(dst).write_bytes(self.summary_csv.read_bytes())
+            messagebox.showinfo("Exported", f"Saved to:\n{dst}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _refresh_plots_list(self) -> None:
+        self._plot_files = []
+        self.plots_list.delete(0, "end")
+        self.plot_preview.configure(text="No plot selected.")
+        self._plot_image_ref = None
+
+        if self.last_run_dir is None or not self.last_run_dir.exists():
+            return
+
+        # Look for pngs under run-dir
+        pngs = sorted(self.last_run_dir.rglob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        self._plot_files = pngs
+        for p in pngs:
+            # show relative path
+            try:
+                rel = p.relative_to(self.last_run_dir)
+                self.plots_list.insert("end", str(rel))
+            except Exception:
+                self.plots_list.insert("end", p.name)
+
+        if not pngs:
+            self.plot_preview.configure(text="No .png plots found under run-dir.")
+
+    def _show_selected_plot(self) -> None:
+        sel = self.plots_list.curselection()
+        if not sel:
+            return
+        i = int(sel[0])
+        if i < 0 or i >= len(self._plot_files):
+            return
+        p = self._plot_files[i]
+        try:
+            img = tk.PhotoImage(file=str(p))
+            self._plot_image_ref = img
+            self.plot_preview.configure(image=img, text="")
+        except Exception as e:
+            self.plot_preview.configure(text=f"Cannot preview {p.name}: {e}", image="")
+            self._plot_image_ref = None
+
+    def _export_selected_plot(self) -> None:
+        sel = self.plots_list.curselection()
+        if not sel:
+            messagebox.showwarning("No selection", "Select a plot first.")
+            return
+        i = int(sel[0])
+        if i < 0 or i >= len(self._plot_files):
+            return
+        src = self._plot_files[i]
+        from tkinter import filedialog
+        dst = filedialog.asksaveasfilename(
+            title="Export plot",
+            initialfile=src.name,
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("All files", "*.*")],
+        )
+        if not dst:
+            return
+        try:
+            Path(dst).write_bytes(src.read_bytes())
+            messagebox.showinfo("Exported", f"Saved to:\n{dst}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
     def _reset_progress(self, total_points: int) -> None:
         self.pb.configure(mode="determinate", maximum=max(1, int(total_points)))
         self.v_progress.set(0)
@@ -118,54 +355,6 @@ class App(tk.Tk):
         if m:
             i = int(m.group(1)) + 1  # show 1-based progress
             self.v_progress.set(i)
-
-
-        # --- DR08 parsing (executor prompt) ---
-
-        # Example:
-
-        #   Set DR08 to R ≈ 1000.0 Ω (requested 1000.0 Ω)
-
-        #   Digits [1M,100k,10k,1k,100,10,1,0.1]:
-
-        #   0 0 0 1 0 0 0 0
-
-        mR = re.search(r"Set DR08 to R\s*≈\s*([0-9\.]+)\s*Ω", chunk)
-        if mR:
-            self.v_dr08_r.set(f"R ≈ {mR.group(1)} Ω")
-
-        mH = re.search(r"Digits \[([^\]]+)\]", chunk)
-        if mH:
-            hdr = [h.strip() for h in mH.group(1).split(",")]
-            if len(hdr) == 8:
-                self._dr08_header = hdr
-
-        if self._dr08_header:
-            for line in chunk.splitlines():
-                s = line.strip()
-                if not s:
-                    continue
-                if re.fullmatch(r"[0-9\s]+", s):
-                    parts = [p for p in s.split() if p.isdigit()]
-                    if len(parts) == 8:
-                        digits = [int(p) for p in parts]
-                        for j, d in enumerate(digits):
-                            self.v_dr08_digits[j].set(str(d))
-
-                        if self._dr08_last is None:
-                            self._dr08_last = digits
-                            for lbl in getattr(self, "_dr08_digit_labels", []):
-                                lbl.configure(style="DR08.Digit.TLabel")
-                        else:
-                            for j, lbl in enumerate(getattr(self, "_dr08_digit_labels", [])):
-                                if digits[j] != self._dr08_last[j]:
-                                    lbl.configure(style="DR08.DigitChanged.TLabel")
-                                else:
-                                    lbl.configure(style="DR08.Digit.TLabel")
-                            self._dr08_last = digits
-
-                        self._dr08_header = None
-                        break
 
         # When executor waits for "press Enter"
         if "press Enter to continue" in chunk or "press Enter" in chunk:
@@ -275,39 +464,6 @@ class App(tk.Tk):
         map_button("Continue.TButton", normal_bg="#7ee08c", hover_bg="#8bf19a", pressed_bg="#6fd47f")
         map_button("Stop.TButton",     normal_bg="#c73737", hover_bg="#e04a4a", pressed_bg="#ab2f2f", fg="#1a0b0b")
         map_button("Jog.TButton",      normal_bg="#d7b84a", hover_bg="#e8ca57", pressed_bg="#b79b3e", fg="#1a1406")
-
-        # ----- Segmented mode selector (radiobuttons as pills) -----
-        style.configure(
-            "Mode.TButton",
-            padding=(10, 8),
-            relief="flat",
-            borderwidth=1,
-            background="#151826",
-            foreground="#d7dce5",
-        )
-        style.map(
-            "Mode.TButton",
-            background=[
-        ("selected", "#4c73ff"),
-        ("active", "#20263a"),
-        ("!selected", "#151826"),
-            ],
-            foreground=[
-        ("selected", "#0b0d14"),
-        ("!selected", "#d7dce5"),
-            ],
-            bordercolor=[
-        ("selected", "#4c73ff"),
-        ("!selected", "#2a2f3a"),
-            ],
-        )
-
-        # ----- DR08 digit display -----
-        style.configure("DR08.Box.TFrame", background="#151826")
-        style.configure("DR08.Decade.TLabel", background="#151826", foreground="#9aa3b2", padding=(6, 2))
-        style.configure("DR08.Digit.TLabel", background="#151826", foreground="#e6e6e6", padding=(6, 6), font=("DejaVu Sans Mono", 12, "bold"))
-        style.configure("DR08.DigitChanged.TLabel", background="#151826", foreground="#4c73ff", padding=(6, 6), font=("DejaVu Sans Mono", 12, "bold"))
-        style.configure("DR08.R.TLabel", background="#151826", foreground="#e6e6e6", padding=(8, 6), font=("DejaVu Sans Mono", 11, "bold"))
         # ----- Status pill -----
         # You "color" the pill by switching styles on the same label.
         style.configure("Status.Idle.TLabel",    background="#151826", foreground="#cfd6e6", padding=(10, 6))
@@ -332,15 +488,22 @@ class App(tk.Tk):
         self.configure(background="#0f111a")
         self.v_status = tk.StringVar(value="IDLE")
         self.v_progress = tk.IntVar(value=0)
-        # DR08 display state (parsed from executor output)
-        self.v_dr08_r = tk.StringVar(value="R ≈ — Ω")
-        self.v_dr08_digits = [tk.StringVar(value="0") for _ in range(8)]
-        self._dr08_header: list[str] | None = None
-        self._dr08_last: list[int] | None = None
         self.log_q: queue.Queue[str] = queue.Queue()
         self.proc: subprocess.Popen | None = None
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
+
+        # ---- State for outputs ----
+        self.last_run_dir: Path | None = None
+        self.last_csv: Path | None = None
+        self.summary_csv: Path | None = None
+        self._live_update_job: str | None = None
+
+        # ---- DR08 / RBox display state (parsed from executor stdout) ----
+        self.v_rbox_target = tk.StringVar(value="—")
+        self.v_rbox_requested = tk.StringVar(value="—")
+        self.v_rbox_digits = [tk.StringVar(value="—") for _ in range(8)]
+        self._awaiting_rbox_digits = False
 
         # ---- Inputs ----
         frm = ttk.Frame(self, padding=10)
@@ -407,61 +570,15 @@ class App(tk.Tk):
 
         add_labeled(r, "Run subdir", self.v_run_subdir); r += 1
 
-
-        # DR08 quick reference (updates live from executor output when prompting)
-        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=(10, 6))
-        r += 1
-        ttk.Label(frm, text="DR08 decade box (set these digits)", font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w")
-        r += 1
-
-        dr08_wrap = ttk.Frame(frm, style="DR08.Box.TFrame")
-        dr08_wrap.grid(row=r, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        r += 1
-
-        decades = ["1M", "100k", "10k", "1k", "100", "10", "1", "0.1"]
-        self._dr08_digit_labels = []
-
-        for j, dec in enumerate(decades):
-            ttk.Label(dr08_wrap, text=dec, style="DR08.Decade.TLabel").grid(row=0, column=j, padx=2, pady=(6, 0))
-
-        for j in range(8):
-            lbl = ttk.Label(dr08_wrap, textvariable=self.v_dr08_digits[j], style="DR08.Digit.TLabel")
-            lbl.grid(row=1, column=j, padx=2, pady=(0, 6))
-            self._dr08_digit_labels.append(lbl)
-
-        ttk.Label(frm, textvariable=self.v_dr08_r, style="DR08.R.TLabel").grid(row=r, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        r += 1
-
         # Right-side options panel
         opt = ttk.Frame(frm)
         opt.grid(row=0, column=2, rowspan=r, sticky="n", padx=(10, 0))
 
         ttk.Label(opt, text="Test Mode (single selector)", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+
         self.v_mode = tk.StringVar(value="plan_only")
-
-        # Mode selector as segmented buttons (more intuitive than tiny radio circles)
-        mode_box = ttk.Frame(opt)
-        mode_box.pack(anchor="w", pady=(6, 0), fill="x")
-
         for label, val in self.MODES:
-            ttk.Radiobutton(
-        mode_box,
-        text=label,
-        variable=self.v_mode,
-        value=val,
-        command=self._on_mode_change,
-        
-        indicatoron=0,
-        selectcolor="#4c73ff",          # selected background-ish
-        fg="#d7dce5",
-        bg="#151826",
-        activeforeground="#ffffff",
-        activebackground="#20263a",
-        relief="flat",
-        bd=0,
-        padx=12,
-        pady=8,
-            ).pack(anchor="w", fill="x", pady=2)
+            ttk.Radiobutton(opt, text=label, style="Dark.TRadiobutton",variable=self.v_mode, value=val, command=self._on_mode_change).pack(anchor="w")
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
 
@@ -482,6 +599,30 @@ class App(tk.Tk):
 
         self.v_prompt_rbox = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Prompt DR08 when resistance changes", variable=self.v_prompt_rbox).pack(anchor="w", pady=(6, 0))
+
+# ---- DR08 / RBox friendly display ----
+        rbox_box = ttk.Frame(opt)
+        rbox_box.pack(anchor="w", fill="x", pady=(8, 0))
+
+        ttk.Label(rbox_box, text="DR08 decade box", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+
+        rbox_meta = ttk.Frame(rbox_box)
+        rbox_meta.pack(anchor="w", fill="x", pady=(2, 0))
+        ttk.Label(rbox_meta, text="Target:").pack(side="left")
+        ttk.Label(rbox_meta, textvariable=self.v_rbox_target, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(6, 14))
+        ttk.Label(rbox_meta, text="Requested:").pack(side="left")
+        ttk.Label(rbox_meta, textvariable=self.v_rbox_requested, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(6, 0))
+
+# Digits [1M,100k,10k,1k,100,10,1,0.1]
+        labels = ["1M", "100k", "10k", "1k", "100", "10", "1", "0.1"]
+        grid = ttk.Frame(rbox_box)
+        grid.pack(anchor="w", pady=(6, 0))
+
+        for i, lab in enumerate(labels):
+            cell = ttk.Frame(grid)
+            cell.grid(row=0, column=i, padx=4, pady=2)
+            ttk.Label(cell, text=lab).pack()
+            ttk.Label(cell, textvariable=self.v_rbox_digits[i], font=("TkDefaultFont", 16, "bold")).pack()
 
         self.v_no_sleep = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="No-sleep (debug only)", variable=self.v_no_sleep).pack(anchor="w")
@@ -523,7 +664,7 @@ class App(tk.Tk):
 
         row_maxrpm = ttk.Frame(opt)
         row_maxrpm.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_maxrpm, text="EPOS commanded RPM cap (plan)").pack(side="left")
+        ttk.Label(row_maxrpm, text="EPOS commandedax RPM cap (plan)").pack(side="left")
         ttk.Entry(row_maxrpm, style="Dark.TEntry",textvariable=self.v_epos_max_rpm, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
@@ -574,11 +715,19 @@ class App(tk.Tk):
 
         self.pb = ttk.Progressbar(status, variable=self.v_progress, style="Thin.Horizontal.TProgressbar")
         self.pb.pack(side="right", fill="x", expand=True, padx=(10, 0))
-        # Log terminal
-        term = ttk.Frame(self, padding=10)
-        term.pack(fill="both", expand=True)
+        # Output area (tabs: Log / Live / Table / Plots)
+        out = ttk.Frame(self, padding=10)
+        out.pack(fill="both", expand=True)
+
+        self.nb = ttk.Notebook(out)
+        self.nb.pack(fill="both", expand=True)
+
+        # --- Log tab ---
+        self.tab_log = ttk.Frame(self.nb)
+        self.nb.add(self.tab_log, text="Log")
+
         self.txt = tk.Text(
-            term,
+            self.tab_log,
             wrap="word",
             bg="#0b0d14",
             fg="#d7dce5",
@@ -589,8 +738,78 @@ class App(tk.Tk):
             padx=10,
             pady=10,
         )
-        self.txt.configure(font=("DejaVu Sans Mono", 10))        
+        self.txt.configure(font=("DejaVu Sans Mono", 10))
         self.txt.pack(fill="both", expand=True)
+
+        # --- Live tab ---
+        self.tab_live = ttk.Frame(self.nb)
+        self.nb.add(self.tab_live, text="Live acquisition")
+
+        self.v_live_status = tk.StringVar(value="Waiting for first CSV…")
+        ttk.Label(self.tab_live, textvariable=self.v_live_status).pack(anchor="w", pady=(0, 6))
+
+        self.live_canvas = None
+        self.live_fig = None
+        self.live_ax = None
+        if FigureCanvasTkAgg is not None:
+            self.live_fig = Figure(figsize=(6, 4), dpi=100)
+            self.live_ax = self.live_fig.add_subplot(111)
+            self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.tab_live)
+            self.live_canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            ttk.Label(self.tab_live, text="Matplotlib not available. Install matplotlib to enable live plots.").pack(anchor="w")
+
+        # --- Table tab ---
+        self.tab_table = ttk.Frame(self.nb)
+        self.nb.add(self.tab_table, text="Results table")
+
+        table_top = ttk.Frame(self.tab_table)
+        table_top.pack(fill="x")
+
+        self.btn_reload_table = ttk.Button(table_top, text="Reload table", command=self._load_summary_table)
+        self.btn_reload_table.pack(side="left")
+
+        self.btn_export_table = ttk.Button(table_top, text="Export table as CSV…", command=self._export_table_csv)
+        self.btn_export_table.pack(side="left", padx=(8, 0))
+
+        self.v_table_status = tk.StringVar(value="No table loaded.")
+        ttk.Label(table_top, textvariable=self.v_table_status).pack(side="left", padx=(12, 0))
+
+        self.table = ttk.Treeview(self.tab_table, columns=(), show="headings", height=18)
+        ysb = ttk.Scrollbar(self.tab_table, orient="vertical", command=self.table.yview)
+        xsb = ttk.Scrollbar(self.tab_table, orient="horizontal", command=self.table.xview)
+        self.table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+
+        self.table.pack(side="top", fill="both", expand=True)
+        ysb.pack(side="right", fill="y")
+        xsb.pack(side="bottom", fill="x")
+
+        # --- Plots tab (shows PNGs generated by treatment) ---
+        self.tab_plots = ttk.Frame(self.nb)
+        self.nb.add(self.tab_plots, text="Plots")
+
+        plots_top = ttk.Frame(self.tab_plots)
+        plots_top.pack(fill="x")
+
+        self.btn_refresh_plots = ttk.Button(plots_top, text="Refresh", command=self._refresh_plots_list)
+        self.btn_refresh_plots.pack(side="left")
+        self.btn_export_plot = ttk.Button(plots_top, text="Export selected…", command=self._export_selected_plot)
+        self.btn_export_plot.pack(side="left", padx=(8, 0))
+
+        body = ttk.Frame(self.tab_plots)
+        body.pack(fill="both", expand=True, pady=(8, 0))
+
+        self.plots_list = tk.Listbox(body, height=12)
+        self.plots_list.pack(side="left", fill="y")
+        self.plots_list.bind("<<ListboxSelect>>", lambda e: self._show_selected_plot())
+
+        self.plot_preview = ttk.Label(body, text="No plot selected.")
+        self.plot_preview.pack(side="left", fill="both", expand=True, padx=(10, 0))
+
+        self._plot_image_ref = None  # keep a reference to PhotoImage
+        self._plot_files: list[Path] = []
+
+        # Keybindings
         self.bind("<Escape>", lambda e: self.on_stop())
         self.bind("<Return>", lambda e: self.on_continue())
 
@@ -612,11 +831,44 @@ class App(tk.Tk):
         try:
             while True:
                 s = self.log_q.get_nowait()
+
+                # Existing handlers
                 self._advance_progress_from_log(s)
+                self._maybe_capture_paths(s)
+
+                # ---------------------------
+                # DR08 / RBox parsing
+                # ---------------------------
+                mR = re.search(
+                    r"Set DR08 to R ≈\s*([0-9.+-eE]+)\s*Ω\s*\(requested\s*([0-9.+-eE]+)\s*Ω\)",
+                    s
+                )
+                if mR:
+                    target = mR.group(1)
+                    req = mR.group(2)
+                    self.v_rbox_target.set(f"{target} Ω")
+                    self.v_rbox_requested.set(f"{req} Ω")
+
+                if "Digits [1M,100k,10k,1k,100,10,1,0.1]:" in s:
+                    self._awaiting_rbox_digits = True
+
+                if self._awaiting_rbox_digits:
+                    md = re.search(
+                        r"^\s*([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s*$",
+                        s
+                    )
+                    if md:
+                        for i in range(8):
+                            self.v_rbox_digits[i].set(md.group(i + 1))
+                        self._awaiting_rbox_digits = False
+
+                # Write to log window
                 self.txt.insert("end", s)
                 self.txt.see("end")
+
         except queue.Empty:
             pass
+
         self.after(50, self._drain_log)
 
     def on_continue(self) -> None:
@@ -1020,6 +1272,23 @@ class App(tk.Tk):
                     return
                 self.log(f"\n[Executor finished: rc={rc2}]\n")
 
+                # 4) run data treatment automatically (adapt the treatment script CLI as needed)
+                try:
+                    treat = REPO_ROOT / "Piezo_data-treatment_Python.py"
+                    if treat.exists():
+                        treat_cmd = [sys.executable, str(treat), "--run-dir", str(run_dir)]
+                        self.log("\n[Data treatment] running…\n")
+                        self._run_cmd_stream(treat_cmd, env)
+                        self.log("\n[Data treatment] done.\n")
+                    else:
+                        self.log("\n[Data treatment] script not found (Piezo_data-treatment_Python.py).\n")
+                except Exception as e:
+                    self.log(f"\n[Data treatment] failed: {e}\n")
+
+                # Refresh UI views
+                self.after(0, self._load_summary_table)
+                self.after(0, self._refresh_plots_list)
+
             except Exception as e:
                 self.log(f"\n[UI error] {e}\n")
             finally:
@@ -1044,21 +1313,4 @@ if __name__ == "__main__":
     app = App()
     app.mainloop()
 
-"""
-NOTE: executor.py must support --rpm-limit for this UI.
 
-Minimal patch for executor.py:
-
-1) add arg:
-    ap.add_argument("--rpm-limit", type=int, default=1000,
-                    help="Hard safety cap on commanded rpm (runtime clamp).")
-
-2) clamp where rpm_out computed in EPOS loop:
-    rpm_out = epos_rpm_override if epos_rpm_override > 0 else rpm_out_plan
-    rpm_out = max(0, min(rpm_out, int(args.rpm_limit)))
-
-3) also clamp manual jog rpm before calling epos.jog_start:
-    jog_rpm = max(0, min(args.epos_jog_rpm, int(args.rpm_limit)))
-
-This makes it impossible to ever command > rpm-limit from UI or CLI.
-"""
