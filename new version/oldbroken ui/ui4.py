@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import re
+
 import os
 import sys
 import time
-import math
 import queue
 import threading
 import subprocess
@@ -12,17 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
-
-# Optional: plots and images
-try:
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-except Exception:
-    Figure = None
-    FigureCanvasTkAgg = None
-
 
 
 # -----------------------------
@@ -117,386 +105,6 @@ class App(tk.Tk):
             "stop": "Status.Stop.TLabel",
         }
         self.lbl_status.configure(style=style_map.get(kind, "Status.Idle.TLabel"))
-
-
-
-    def _maybe_capture_paths(self, chunk: str) -> None:
-        """Listen to executor output to discover latest run-dir / CSV / table / plots."""
-        import re
-
-        # Executor prints this in ui4: [Using run-dir: ...]
-        m = re.search(r"\[Using run-dir: (.+?)\]", chunk)
-        if m:
-            p = Path(m.group(1)).expanduser()
-            if p.exists():
-                self.last_run_dir = p
-                # whenever run-dir updates, refresh plot list + attempt table reload
-                self.after(0, self._refresh_plots_list)
-                self.after(0, self._load_summary_table)
-
-        # Try to catch CSV saves from executor log
-        # common patterns: "Saving CSV to ..." or "Saved ...csv" or any ".csv" path
-        m2 = re.search(r"(/[^\s]+\.csv)", chunk)
-        if m2:
-            p = Path(m2.group(1))
-            if p.exists():
-                self.last_csv = p
-                self.after(0, self._kick_live_update)
-
-        # Data treatment might log where it wrote summary table
-        m3 = re.search(r"SUMMARY_CSV:\s*(/[^\s]+\.csv)", chunk)
-        if m3:
-            p = Path(m3.group(1))
-            if p.exists():
-                self.summary_csv = p
-                self.after(0, self._load_summary_table)
-
-    def _kick_live_update(self) -> None:
-        if self._live_update_job is None:
-            self._live_update_job = self.after(300, self._update_live_plot)
-
-    def _update_live_plot(self) -> None:
-        self._live_update_job = None
-        if self.last_csv is None or not self.last_csv.exists():
-            self.v_live_status.set("Waiting for first CSV…")
-            return
-
-        # Parse latest CSV and plot (time_s vs channels)
-        try:
-            import csv
-            times = []
-            y1 = []
-            y2 = []
-            y1_label = "pressure"
-            y2_label = "voltage"
-            with self.last_csv.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.reader(f)
-                header = None
-                for row in reader:
-                    if not row:
-                        continue
-                    if row[0].startswith("#"):
-                        continue
-                    # find header
-                    if header is None:
-                        header = [c.strip() for c in row]
-                        if len(header) >= 3:
-                            y1_label = header[1]
-                            y2_label = header[2]
-                        continue
-                    # Expect at least 3 cols
-                    if len(row) < 3:
-                        continue
-                    try:
-                        t = float(row[0])
-                        a = float(row[1])
-                        b = float(row[2])
-                    except Exception:
-                        continue
-                    times.append(t)
-                    y1.append(a)
-                    y2.append(b)
-
-            self.v_live_status.set(f"Live: {self.last_csv.name}  ({len(times)} samples)")
-            if self.live_canvas is None or self.live_ax is None:
-                return
-
-            self.live_ax.clear()
-            if times:
-                self.live_ax.plot(times, y1, label=y1_label)
-                self.live_ax.plot(times, y2, label=y2_label)
-                self.live_ax.set_xlabel("time (s)")
-                self.live_ax.set_ylabel("signal")
-                self.live_ax.grid(True, alpha=0.25)
-                self.live_ax.legend(loc="best")
-            self.live_canvas.draw_idle()
-
-        except Exception as e:
-            self.v_live_status.set(f"Live plot error: {e}")
-
-        # keep updating while executor is running
-        if self.proc is not None and self.proc.poll() is None:
-            self._kick_live_update()
-
-    def _parse_measurement_name(self, name: str) -> tuple[float, float, int] | None:
-        m = re.match(r"^SingleMeasurement_(.+)Hz_(.+)Ohms_(\d+)\.csv$", name)
-        if not m:
-            return None
-        try:
-            return float(m.group(1)), float(m.group(2)), int(m.group(3))
-        except Exception:
-            return None
-
-    def _write_treatment_plots(self, rows: list[dict[str, float]], run_dir: Path) -> None:
-        if Figure is None:
-            self.log("[Data treatment] matplotlib unavailable; skipping plots.\n")
-            return
-        if not rows:
-            return
-
-        grouped: dict[float, list[dict[str, float]]] = {}
-        for r in rows:
-            grouped.setdefault(float(r["freq_hz"]), []).append(r)
-
-        def save_plot(name: str, y_key: str, y_label: str, x_with_omega: bool) -> None:
-            fig = Figure(figsize=(8, 4.6), dpi=110)
-            ax = fig.add_subplot(111)
-            for f_hz, items in sorted(grouped.items()):
-                xs = []
-                ys = []
-                for it in sorted(items, key=lambda x: x["r_ohm"]):
-                    x_val = it["r_ohm"] * f_hz * (2.0 * math.pi if x_with_omega else 1.0)
-                    if x_val <= 0:
-                        continue
-                    xs.append(math.log10(x_val))
-                    ys.append(it[y_key])
-                if xs and ys:
-                    ax.plot(xs, ys, marker="o", linewidth=1.5, label=f"{f_hz:g} Hz")
-            ax.set_xlabel("log10(R*f*2*pi)" if x_with_omega else "log10(R*f)")
-            ax.set_ylabel(y_label)
-            ax.grid(True, alpha=0.25)
-            if len(grouped) > 1:
-                ax.legend(loc="best")
-            fig.savefig(run_dir / name)
-
-        save_plot("CombinedData_VoltageGraph.png", "voltage_abs_mean", "Average |voltage| [V]", True)
-        save_plot("CombinedData_PowerGraph.png", "power_mean", "Average power [W]", True)
-        save_plot("CombinedData_PressureGraph.png", "pressure_amp", "Pressure amplitude [Bar]", False)
-
-    def _run_treatment_for_dir(self, run_dir: Path) -> Path:
-        import csv
-        from statistics import fmean
-
-        csv_dir = run_dir / "csv"
-        if not csv_dir.exists():
-            raise RuntimeError(f"No csv directory found: {csv_dir}")
-
-        all_csv = sorted(csv_dir.glob("*.csv"))
-        if not all_csv:
-            raise RuntimeError(f"No CSV files found in {csv_dir}")
-
-        rows: list[dict[str, float]] = []
-        for p in all_csv:
-            meta = self._parse_measurement_name(p.name)
-            if meta is None:
-                continue
-            freq_hz, r_ohm, rep = meta
-
-            times: list[float] = []
-            pressures: list[float] = []
-            voltages: list[float] = []
-            powers: list[float] = []
-
-            with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        times.append(float(row.get("time", "nan")))
-                        pressures.append(float(row.get("pressure", "nan")))
-                        voltages.append(float(row.get("voltage", "nan")))
-                        powers.append(float(row.get("power", "nan")))
-                    except Exception:
-                        continue
-
-            if not times:
-                continue
-
-            pressure_amp = max(pressures) - min(pressures)
-            voltage_abs_mean = fmean(abs(v) for v in voltages)
-            power_mean = fmean(powers) if powers else 0.0
-
-            rows.append({
-                "freq_hz": freq_hz,
-                "r_ohm": r_ohm,
-                "rep": rep,
-                "n_samples": float(len(times)),
-                "pressure_amp": float(pressure_amp),
-                "voltage_abs_mean": float(voltage_abs_mean),
-                "power_mean": float(power_mean),
-            })
-
-        if not rows:
-            raise RuntimeError("No legacy measurement CSVs found (SingleMeasurement_*Hz_*Ohms_*.csv).")
-
-        rows.sort(key=lambda r: (r["freq_hz"], r["r_ohm"], r["rep"]))
-        summary = run_dir / "summary_table.csv"
-        with summary.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["freq_hz", "r_ohm", "rep", "n_samples", "pressure_amp", "voltage_abs_mean", "power_mean"])
-            for r in rows:
-                writer.writerow([
-                    f"{r['freq_hz']:.12g}",
-                    f"{r['r_ohm']:.12g}",
-                    int(r["rep"]),
-                    int(r["n_samples"]),
-                    f"{r['pressure_amp']:.12g}",
-                    f"{r['voltage_abs_mean']:.12g}",
-                    f"{r['power_mean']:.12g}",
-                ])
-
-        self._write_treatment_plots(rows, run_dir)
-        return summary
-
-    def on_run_treatment(self) -> None:
-        if self.last_run_dir is None or not self.last_run_dir.exists():
-            messagebox.showwarning("No run selected", "Run an experiment first or select a valid run directory in logs.")
-            return
-
-        run_dir = self.last_run_dir
-        self.btn_run_treatment.configure(state="disabled")
-        self.v_treatment_status.set("Running treatment...")
-        self.log(f"[Data treatment] started for {run_dir}\n")
-
-        def work() -> None:
-            try:
-                summary = self._run_treatment_for_dir(run_dir)
-                self.summary_csv = summary
-                self.log(f"[Data treatment] summary written: {summary}\n")
-                self.after(0, self._load_summary_table)
-                self.after(0, self._refresh_plots_list)
-                self.after(0, lambda: self.v_treatment_status.set("Treatment complete."))
-                self.after(0, lambda: self.main_tabs.select(self.tab_analysis_main))
-            except Exception as e:
-                self.log(f"[Data treatment] failed: {e}\n")
-                self.after(0, lambda: self.v_treatment_status.set(f"Treatment failed: {e}"))
-            finally:
-                self.after(0, lambda: self.btn_run_treatment.configure(state="normal"))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _find_summary_csv(self) -> Path | None:
-        # Prefer explicit summary_csv captured from logs
-        if self.summary_csv is not None and self.summary_csv.exists():
-            return self.summary_csv
-        # Otherwise look in run-dir
-        if self.last_run_dir is None or not self.last_run_dir.exists():
-            return None
-        candidates = []
-        for pat in ("summary_table.csv", "results_table.csv", "*summary*.csv", "*table*.csv"):
-            candidates.extend(self.last_run_dir.rglob(pat))
-        candidates = [p for p in candidates if p.is_file()]
-        if not candidates:
-            return None
-        # newest
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-
-    def _load_summary_table(self) -> None:
-        p = self._find_summary_csv()
-        if p is None:
-            self.v_table_status.set("No summary table found yet.")
-            return
-        self.summary_csv = p
-        try:
-            import csv
-            with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            if not rows:
-                self.v_table_status.set(f"Empty table: {p.name}")
-                return
-            header = rows[0]
-            data = rows[1:]
-
-            # Configure columns
-            self.table.delete(*self.table.get_children())
-            self.table["columns"] = header
-            for col in header:
-                self.table.heading(col, text=col)
-                self.table.column(col, width=max(80, min(220, 12 * len(col))), anchor="w")
-
-            # Insert limited number for UI responsiveness
-            max_rows = 5000
-            for r in data[:max_rows]:
-                # pad / trim
-                r2 = (r + [""] * len(header))[: len(header)]
-                self.table.insert("", "end", values=r2)
-
-            extra = "" if len(data) <= max_rows else f" (showing first {max_rows}/{len(data)})"
-            self.v_table_status.set(f"Loaded: {p.name}{extra}")
-
-        except Exception as e:
-            self.v_table_status.set(f"Failed to load table: {e}")
-
-    def _export_table_csv(self) -> None:
-        if self.summary_csv is None or not self.summary_csv.exists():
-            messagebox.showwarning("No table", "No summary table to export yet.")
-            return
-        from tkinter import filedialog
-        dst = filedialog.asksaveasfilename(
-            title="Export table as CSV",
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
-        )
-        if not dst:
-            return
-        try:
-            Path(dst).write_bytes(self.summary_csv.read_bytes())
-            messagebox.showinfo("Exported", f"Saved to:\n{dst}")
-        except Exception as e:
-            messagebox.showerror("Export failed", str(e))
-
-    def _refresh_plots_list(self) -> None:
-        self._plot_files = []
-        self.plots_list.delete(0, "end")
-        self.plot_preview.configure(text="No plot selected.")
-        self._plot_image_ref = None
-
-        if self.last_run_dir is None or not self.last_run_dir.exists():
-            return
-
-        # Look for pngs under run-dir
-        pngs = sorted(self.last_run_dir.rglob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-        self._plot_files = pngs
-        for p in pngs:
-            # show relative path
-            try:
-                rel = p.relative_to(self.last_run_dir)
-                self.plots_list.insert("end", str(rel))
-            except Exception:
-                self.plots_list.insert("end", p.name)
-
-        if not pngs:
-            self.plot_preview.configure(text="No .png plots found under run-dir.")
-
-    def _show_selected_plot(self) -> None:
-        sel = self.plots_list.curselection()
-        if not sel:
-            return
-        i = int(sel[0])
-        if i < 0 or i >= len(self._plot_files):
-            return
-        p = self._plot_files[i]
-        try:
-            img = tk.PhotoImage(file=str(p))
-            self._plot_image_ref = img
-            self.plot_preview.configure(image=img, text="")
-        except Exception as e:
-            self.plot_preview.configure(text=f"Cannot preview {p.name}: {e}", image="")
-            self._plot_image_ref = None
-
-    def _export_selected_plot(self) -> None:
-        sel = self.plots_list.curselection()
-        if not sel:
-            messagebox.showwarning("No selection", "Select a plot first.")
-            return
-        i = int(sel[0])
-        if i < 0 or i >= len(self._plot_files):
-            return
-        src = self._plot_files[i]
-        from tkinter import filedialog
-        dst = filedialog.asksaveasfilename(
-            title="Export plot",
-            initialfile=src.name,
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("All files", "*.*")],
-        )
-        if not dst:
-            return
-        try:
-            Path(dst).write_bytes(src.read_bytes())
-            messagebox.showinfo("Exported", f"Saved to:\n{dst}")
-        except Exception as e:
-            messagebox.showerror("Export failed", str(e))
 
     def _reset_progress(self, total_points: int) -> None:
         self.pb.configure(mode="determinate", maximum=max(1, int(total_points)))
@@ -629,9 +237,9 @@ class App(tk.Tk):
         style.configure("Thin.Horizontal.TProgressbar", thickness=16)
     MODES = (
         ("Plan-only (simulate, no hardware)", "plan_only"),
-        ("Pitaya only", "pitaya_only"),
-        ("EPOS only", "epos_only"),
-        ("Full experiment", "full_experiment"),
+        ("EPOS Safe Jog (motor only)", "epos_jog"),
+        ("EPOS Safe Plan (motor only)", "epos_plan"),
+        ("Full Run (EPOS + Pitaya)", "full_run"),
     )
 
     def __init__(self) -> None:
@@ -647,32 +255,8 @@ class App(tk.Tk):
         self.worker: threading.Thread | None = None
         self.stop_flag = threading.Event()
 
-        # ---- State for outputs ----
-        self.last_run_dir: Path | None = None
-        self.last_csv: Path | None = None
-        self.summary_csv: Path | None = None
-        self._live_update_job: str | None = None
-
-        # ---- DR08 / RBox display state (parsed from executor stdout) ----
-        self.v_rbox_target = tk.StringVar(value="—")
-        self.v_rbox_requested = tk.StringVar(value="—")
-        self.v_rbox_digits = [tk.StringVar(value="—") for _ in range(8)]
-        self._awaiting_rbox_digits = False
-
-        # ---- Main layout tabs ----
-        self.main_tabs = ttk.Notebook(self)
-        self.main_tabs.pack(fill="both", expand=True)
-        self.tab_run_main = ttk.Frame(self.main_tabs)
-        self.tab_log_main = ttk.Frame(self.main_tabs)
-        self.tab_live_main = ttk.Frame(self.main_tabs)
-        self.tab_analysis_main = ttk.Frame(self.main_tabs)
-        self.main_tabs.add(self.tab_run_main, text="Run")
-        self.main_tabs.add(self.tab_log_main, text="Log")
-        self.main_tabs.add(self.tab_live_main, text="Live acquisition")
-        self.main_tabs.add(self.tab_analysis_main, text="Analysis")
-
         # ---- Inputs ----
-        frm = ttk.Frame(self.tab_run_main, padding=10)
+        frm = ttk.Frame(self, padding=10)
         frm.pack(fill="x")
 
         def add_labeled(entry_row: int, label: str, var: tk.StringVar, width: int = 18):
@@ -711,7 +295,7 @@ class App(tk.Tk):
         self.v_epos_alternate = tk.BooleanVar(value=False)
         self.v_epos_rest_s = tk.StringVar(value="0.0")
         self.v_epos_rpm_override = tk.StringVar(value="0")
-        self.v_epos_max_rpm = tk.StringVar(value="5000")  # plan cap
+        self.v_epos_max_rpm = tk.StringVar(value="1000")  # plan cap
 
         # Hardware toggles (generator side)
         self.v_gen_pitaya_enabled = tk.BooleanVar(value=True)
@@ -751,7 +335,7 @@ class App(tk.Tk):
         # Safety knobs
         ttk.Label(opt, text="Safety", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
 
-        self.v_rpm_limit = tk.StringVar(value="500")  # runtime safety clamp (executor)
+        self.v_rpm_limit = tk.StringVar(value="200")  # runtime safety clamp (executor)
         row_lim = ttk.Frame(opt)
         row_lim.pack(anchor="w", pady=(4, 0))
         ttk.Label(row_lim, text="RPM safety limit (executor)").pack(side="left")
@@ -766,37 +350,15 @@ class App(tk.Tk):
         self.v_prompt_rbox = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Prompt DR08 when resistance changes", variable=self.v_prompt_rbox).pack(anchor="w", pady=(6, 0))
 
-# ---- DR08 / RBox friendly display ----
-        rbox_box = ttk.Frame(opt)
-        rbox_box.pack(anchor="w", fill="x", pady=(8, 0))
-
-        ttk.Label(rbox_box, text="DR08 decade box", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-
-        rbox_meta = ttk.Frame(rbox_box)
-        rbox_meta.pack(anchor="w", fill="x", pady=(2, 0))
-        ttk.Label(rbox_meta, text="Target:").pack(side="left")
-        ttk.Label(rbox_meta, textvariable=self.v_rbox_target, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(6, 14))
-        ttk.Label(rbox_meta, text="Requested:").pack(side="left")
-        ttk.Label(rbox_meta, textvariable=self.v_rbox_requested, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(6, 0))
-
-# Digits [1M,100k,10k,1k,100,10,1,0.1]
-        labels = ["1M", "100k", "10k", "1k", "100", "10", "1", "0.1"]
-        grid = ttk.Frame(rbox_box)
-        grid.pack(anchor="w", pady=(6, 0))
-
-        for i, lab in enumerate(labels):
-            cell = ttk.Frame(grid)
-            cell.grid(row=0, column=i, padx=4, pady=2)
-            ttk.Label(cell, text=lab).pack()
-            ttk.Label(cell, textvariable=self.v_rbox_digits[i], font=("TkDefaultFont", 16, "bold")).pack()
-
         self.v_no_sleep = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="No-sleep (debug only)", variable=self.v_no_sleep).pack(anchor="w")
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
 
-        # Generator toggles are derived automatically from selected mode.
-        ttk.Label(opt, text="Hardware config is automatic from mode", font=("TkDefaultFont", 9, "italic")).pack(anchor="w")
+        # Generator toggles
+        ttk.Label(opt, text="Generator settings", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        ttk.Checkbutton(opt, text="Write Pitaya enabled in config", variable=self.v_gen_pitaya_enabled).pack(anchor="w")
+        ttk.Checkbutton(opt, text="Write EPOS enabled in config", variable=self.v_gen_epos_enabled).pack(anchor="w")
 
         row_sig = ttk.Frame(opt)
         row_sig.pack(anchor="w", pady=(6, 0))
@@ -859,7 +421,7 @@ class App(tk.Tk):
         self.btn_jog.pack(anchor="w", pady=(6, 0))
 
         # Buttons
-        btns = ttk.Frame(self.tab_run_main, padding=(10, 0))
+        btns = ttk.Frame(self, padding=(10, 0))
         btns.pack(fill="x")
 
         self.btn_run = ttk.Button(btns, text="Generate + Run Selected Mode", command=self.on_run, style="Run.TButton")
@@ -869,7 +431,7 @@ class App(tk.Tk):
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.on_stop, state="disabled", style="Stop.TButton")
         self.btn_stop.pack(side="left", padx=10)
 
-        status = ttk.Frame(self.tab_run_main, padding=(10, 10))
+        status = ttk.Frame(self, padding=(10, 10))
         status.pack(fill="x")
 
         ttk.Label(status, text="Status:", font=("TkDefaultFont", 10, "bold")).pack(side="left")
@@ -879,12 +441,11 @@ class App(tk.Tk):
 
         self.pb = ttk.Progressbar(status, variable=self.v_progress, style="Thin.Horizontal.TProgressbar")
         self.pb.pack(side="right", fill="x", expand=True, padx=(10, 0))
-        # --- Log tab ---
-        self.tab_log = ttk.Frame(self.tab_log_main, padding=10)
-        self.tab_log.pack(fill="both", expand=True)
-
+        # Log terminal
+        term = ttk.Frame(self, padding=10)
+        term.pack(fill="both", expand=True)
         self.txt = tk.Text(
-            self.tab_log,
+            term,
             wrap="word",
             bg="#0b0d14",
             fg="#d7dce5",
@@ -895,107 +456,8 @@ class App(tk.Tk):
             padx=10,
             pady=10,
         )
-        self.txt.configure(font=("DejaVu Sans Mono", 10))
+        self.txt.configure(font=("DejaVu Sans Mono", 10))        
         self.txt.pack(fill="both", expand=True)
-
-        # --- Live tab ---
-        self.tab_live = ttk.Frame(self.tab_live_main, padding=10)
-        self.tab_live.pack(fill="both", expand=True)
-
-        self.v_live_status = tk.StringVar(value="Waiting for first CSV…")
-        ttk.Label(self.tab_live, textvariable=self.v_live_status).pack(anchor="w", pady=(0, 6))
-
-        self.live_canvas = None
-        self.live_fig = None
-        self.live_ax = None
-        if FigureCanvasTkAgg is not None:
-            self.live_fig = Figure(figsize=(6, 4), dpi=100)
-            self.live_ax = self.live_fig.add_subplot(111)
-            self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.tab_live)
-            self.live_canvas.get_tk_widget().pack(fill="both", expand=True)
-        else:
-            ttk.Label(self.tab_live, text="Matplotlib not available. Install matplotlib to enable live plots.").pack(anchor="w")
-
-        # Analysis area is a dedicated tab for table + plots
-        analysis_wrap = ttk.Frame(self.tab_analysis_main, padding=10)
-        analysis_wrap.pack(fill="both", expand=True)
-
-        treatment_top = ttk.Frame(analysis_wrap)
-        treatment_top.pack(fill="x", pady=(0, 8))
-        self.btn_run_treatment = ttk.Button(
-            treatment_top,
-            text="Run Data Treatment (embedded)",
-            command=self.on_run_treatment,
-        )
-        self.btn_run_treatment.pack(side="left")
-        self.v_treatment_status = tk.StringVar(value="Treatment idle.")
-        ttk.Label(treatment_top, textvariable=self.v_treatment_status).pack(side="left", padx=(10, 0))
-
-        self.nb_analysis = ttk.Notebook(analysis_wrap)
-        self.nb_analysis.pack(fill="both", expand=True)
-
-        # --- Table tab ---
-        self.tab_table = ttk.Frame(self.nb_analysis)
-        self.nb_analysis.add(self.tab_table, text="Results table")
-
-        table_top = ttk.Frame(self.tab_table)
-        table_top.pack(fill="x")
-
-        self.btn_reload_table = ttk.Button(table_top, text="Reload table", command=self._load_summary_table)
-        self.btn_reload_table.pack(side="left")
-
-        self.btn_export_table = ttk.Button(table_top, text="Export table as CSV…", command=self._export_table_csv)
-        self.btn_export_table.pack(side="left", padx=(8, 0))
-
-        self.v_table_status = tk.StringVar(value="No table loaded.")
-        ttk.Label(table_top, textvariable=self.v_table_status).pack(side="left", padx=(12, 0))
-
-        self.table = ttk.Treeview(self.tab_table, columns=(), show="headings", height=24)
-        ysb = ttk.Scrollbar(self.tab_table, orient="vertical", command=self.table.yview)
-        xsb = ttk.Scrollbar(self.tab_table, orient="horizontal", command=self.table.xview)
-        self.table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
-
-        self.table.pack(side="top", fill="both", expand=True)
-        ysb.pack(side="right", fill="y")
-        xsb.pack(side="bottom", fill="x")
-
-        # --- Plots tab (shows PNGs generated by treatment) ---
-        self.tab_plots = ttk.Frame(self.nb_analysis)
-        self.nb_analysis.add(self.tab_plots, text="Plots")
-
-        plots_top = ttk.Frame(self.tab_plots)
-        plots_top.pack(fill="x")
-
-        self.btn_refresh_plots = ttk.Button(plots_top, text="Refresh", command=self._refresh_plots_list)
-        self.btn_refresh_plots.pack(side="left")
-        self.btn_export_plot = ttk.Button(plots_top, text="Export selected…", command=self._export_selected_plot)
-        self.btn_export_plot.pack(side="left", padx=(8, 0))
-
-        body = ttk.Panedwindow(self.tab_plots, orient="horizontal")
-        body.pack(fill="both", expand=True, pady=(8, 0))
-
-        left = ttk.Frame(body, width=280)
-        right = ttk.Frame(body)
-        body.add(left, weight=0)
-        body.add(right, weight=1)
-
-        list_wrap = ttk.Frame(left)
-        list_wrap.pack(fill="both", expand=True)
-
-        self.plots_list = tk.Listbox(list_wrap, height=18)
-        self.plots_list.pack(side="left", fill="both", expand=True)
-        self.plots_list.bind("<<ListboxSelect>>", lambda e: self._show_selected_plot())
-        plots_ysb = ttk.Scrollbar(list_wrap, orient="vertical", command=self.plots_list.yview)
-        plots_ysb.pack(side="right", fill="y")
-        self.plots_list.configure(yscrollcommand=plots_ysb.set)
-
-        self.plot_preview = ttk.Label(right, text="No plot selected.", anchor="center")
-        self.plot_preview.pack(fill="both", expand=True, padx=(10, 0))
-
-        self._plot_image_ref = None  # keep a reference to PhotoImage
-        self._plot_files: list[Path] = []
-
-        # Keybindings
         self.bind("<Escape>", lambda e: self.on_stop())
         self.bind("<Return>", lambda e: self.on_continue())
 
@@ -1017,44 +479,11 @@ class App(tk.Tk):
         try:
             while True:
                 s = self.log_q.get_nowait()
-
-                # Existing handlers
                 self._advance_progress_from_log(s)
-                self._maybe_capture_paths(s)
-
-                # ---------------------------
-                # DR08 / RBox parsing
-                # ---------------------------
-                mR = re.search(
-                    r"Set DR08 to R ≈\s*([0-9.+-eE]+)\s*Ω\s*\(requested\s*([0-9.+-eE]+)\s*Ω\)",
-                    s
-                )
-                if mR:
-                    target = mR.group(1)
-                    req = mR.group(2)
-                    self.v_rbox_target.set(f"{target} Ω")
-                    self.v_rbox_requested.set(f"{req} Ω")
-
-                if "Digits [1M,100k,10k,1k,100,10,1,0.1]:" in s:
-                    self._awaiting_rbox_digits = True
-
-                if self._awaiting_rbox_digits:
-                    md = re.search(
-                        r"^\s*([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s+([0-9])\s*$",
-                        s
-                    )
-                    if md:
-                        for i in range(8):
-                            self.v_rbox_digits[i].set(md.group(i + 1))
-                        self._awaiting_rbox_digits = False
-
-                # Write to log window
                 self.txt.insert("end", s)
                 self.txt.see("end")
-
         except queue.Empty:
             pass
-
         self.after(50, self._drain_log)
 
     def on_continue(self) -> None:
@@ -1086,11 +515,6 @@ class App(tk.Tk):
 
         for line in self.proc.stdout:
             if self.stop_flag.is_set():
-                if self.proc and self.proc.poll() is None:
-                    try:
-                        self.proc.terminate()
-                    except Exception:
-                        pass
                 break
             self.log(line)
 
@@ -1101,11 +525,7 @@ class App(tk.Tk):
         try:
             rc = self.proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            try:
-                self.proc.kill()
-                rc = self.proc.wait(timeout=1)
-            except Exception:
-                rc = -1
+            rc = -1
         finally:
             self.btn_continue.configure(state="disabled")
 
@@ -1140,7 +560,7 @@ class App(tk.Tk):
         mode = self.v_mode.get()
 
         if mode == "plan_only":
-            # Simulate full chain (no hardware connection due to --dry-run)
+            # safest defaults
             self.v_gen_epos_enabled.set(True)
             self.v_gen_pitaya_enabled.set(True)
             self.v_no_sleep.set(True)
@@ -1148,23 +568,24 @@ class App(tk.Tk):
             if self.v_rpm_limit.get().strip() == "":
                 self.v_rpm_limit.set("200")
 
-        elif mode == "pitaya_only":
-            self.v_gen_epos_enabled.set(False)
-            self.v_gen_pitaya_enabled.set(True)
-            self.v_no_sleep.set(False)
-            self.v_prompt_rbox.set(True)
-            if self.v_rpm_limit.get().strip() == "":
-                self.v_rpm_limit.set("500")
-
-        elif mode == "epos_only":
+        elif mode == "epos_jog":
             self.v_gen_epos_enabled.set(True)
-            self.v_gen_pitaya_enabled.set(False)
+            # pitaya irrelevant for jog
             self.v_no_sleep.set(True)
             self.v_prompt_rbox.set(False)
+            # keep rpm limit low by default
             if self.v_rpm_limit.get().strip() == "" or int(self.v_rpm_limit.get()) > 200:
+                self.v_rpm_limit.set("60")
+
+        elif mode == "epos_plan":
+            self.v_gen_epos_enabled.set(True)
+            self.v_gen_pitaya_enabled.set(True)  # doesn't matter; executor will disable pitaya
+            self.v_no_sleep.set(True)
+            self.v_prompt_rbox.set(True)
+            if self.v_rpm_limit.get().strip() == "" or int(self.v_rpm_limit.get()) > 500:
                 self.v_rpm_limit.set("200")
 
-        elif mode == "full_experiment":
+        elif mode == "full_run":
             self.v_gen_epos_enabled.set(True)
             self.v_gen_pitaya_enabled.set(True)
             self.v_no_sleep.set(False)
@@ -1175,47 +596,75 @@ class App(tk.Tk):
     # -----------------------------
     # Actions
     # -----------------------------
-    def _terminate_active_proc(self) -> None:
-        p = self.proc
-        if p is None or p.poll() is not None:
-            return
-
+    def _send_hard_stop(self, rpm_limit: int, dry_run: bool) -> None:
         try:
-            p.terminate()
-            self.after(0, lambda: self.log("[UI] Sent terminate to executor.\n"))
+            stop_cmd = [
+                sys.executable, str(EXEC),
+                "--run-dir", str(GENERATED),
+                "--use-epos",
+                "--no-pitaya",
+                "--epos-jog",
+                "--epos-jog-dir", "cw",
+                "--epos-jog-rpm", "1",
+                "--epos-jog-seconds", "0.01",
+                "--rpm-limit", str(rpm_limit),
+            ]
+
+            if dry_run:
+                # insert after executor path
+                stop_cmd.insert(2, "--dry-run")
+
+            env = self._make_env()
+
+            subprocess.run(
+                stop_cmd,
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+
+            self.after(0, lambda: self.log("[UI] Motor stop command sent.\n"))
+
+        except subprocess.TimeoutExpired:
+            self.after(0, lambda: self.log("[UI] Hard stop timed out (2s).\n"))
         except Exception as e:
-            self.after(0, lambda: self.log(f"[UI] Terminate failed: {e}\n"))
-            return
-
-        deadline = time.time() + 0.5
-        while time.time() < deadline:
-            if p.poll() is not None:
-                return
-            time.sleep(0.02)
-
-        if p.poll() is None:
-            try:
-                p.kill()
-                self.after(0, lambda: self.log("[UI] Forced kill on executor.\n"))
-            except Exception as e:
-                self.after(0, lambda: self.log(f"[UI] Kill failed: {e}\n"))
+            self.after(0, lambda: self.log(f"[UI] Hard stop failed: {e}\n"))
     def on_stop(self) -> None:
         """
         Hard stop:
-        1) request stream-loop stop
-        2) terminate executor (fallback to kill if needed)
+        1) terminate running executor
+        2) send micro jog command (rpm=1, 0.01s) to force EPOS velocity reset
         """
         self.stop_flag.set()
         self._set_status("STOPPING...", "stop")
+        # 1) terminate executor process
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
 
         self.log("\n[Stop requested]\n")
+        ## Capture UI values BEFORE threading (Tk thread-safety)
+        try:
+            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 1000)
+        except Exception:
+            rpm_limit = 60  # fallback
+
+        # Decide if we should forward --dry-run:
+        # In your UI, dry-run only happens in "plan_only" mode.
+        dry_run = (self.v_mode.get() == "plan_only")
 
         threading.Thread(
-            target=self._terminate_active_proc,
+            target=self._send_hard_stop,
+            args=(rpm_limit, dry_run),
             daemon=True
         ).start()
 
         # UI state cleanup
+        self.proc = None
         self.btn_stop.configure(state="disabled")
         self.btn_continue.configure(state="disabled")
         
@@ -1234,8 +683,8 @@ class App(tk.Tk):
             return
 
         try:
-            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 5000)
-            rpm = self._parse_int(self.v_jog_rpm.get(), "Jog RPM", 1, 5000)
+            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 8000)
+            rpm = self._parse_int(self.v_jog_rpm.get(), "Jog RPM", 1, 1000)
             secs = self._parse_float(self.v_jog_seconds.get(), "Jog seconds", 0.01, 60.0)
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
@@ -1288,10 +737,6 @@ class App(tk.Tk):
             messagebox.showerror("Missing files", "gen_config.py or executor.py not found in repo root.")
             return
 
-        mode = self.v_mode.get()
-        pitaya_enabled = mode in ("plan_only", "pitaya_only", "full_experiment")
-        epos_enabled = mode in ("plan_only", "epos_only", "full_experiment")
-
         try:
             ga = GenArgs(
                 sample_name=self.v_sample.get().strip(),
@@ -1309,20 +754,20 @@ class App(tk.Tk):
                 periods=self._parse_float(self.v_periods.get(), "Periods", 0.01),
                 repetitions=self._parse_int(self.v_repetitions.get(), "Repetitions", 1, 1_000),
 
-                pitaya_enabled=pitaya_enabled,
-                epos_enabled=epos_enabled,
+                pitaya_enabled=bool(self.v_gen_pitaya_enabled.get()),
+                epos_enabled=bool(self.v_gen_epos_enabled.get()),
 
                 epos_direction=self.v_epos_direction.get(),
                 epos_alternate=bool(self.v_epos_alternate.get()),
                 epos_rest_s=self._parse_float(self.v_epos_rest_s.get(), "Rest seconds", 0.0, 60.0),
-                epos_rpm_override=self._parse_int(self.v_epos_rpm_override.get(), "RPM override", 0, 5000),
-                epos_max_rpm=self._parse_int(self.v_epos_max_rpm.get(), "EPOS max RPM cap", 1, 5000),
+                epos_rpm_override=self._parse_int(self.v_epos_rpm_override.get(), "RPM override", 0, 1000),
+                epos_max_rpm=self._parse_int(self.v_epos_max_rpm.get(), "EPOS max RPM cap", 1, 1000),
 
                 signal_hz_multiplier=self._parse_float(self.v_signal_mult.get(), "signal_hz_multiplier", 0.0001, 1e9),
             )
 
             points_n = self._parse_int(self.v_points.get(), "Plan points", 1, 1_000_000)
-            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 5000)
+            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 1000)
             self._reset_progress(points_n)
             self._set_status("RUNNING", "running")
         except Exception as e:
@@ -1336,8 +781,10 @@ class App(tk.Tk):
             messagebox.showerror("Invalid input", "Max R must be >= Min R.")
             return
 
+        mode = self.v_mode.get()
+
         # In safe modes, force low limits unless user explicitly changed
-        if mode in ("epos_only", "full_experiment") and rpm_limit > 1000:
+        if mode in ("plan_only", "epos_plan", "epos_jog") and rpm_limit > 1000:
             if not messagebox.askyesno("Safety check", f"RPM safety limit is {rpm_limit}. Continue?"):
                 return
 
@@ -1407,7 +854,7 @@ class App(tk.Tk):
                 exec_cmd += ["--rpm-limit", str(rpm_limit)]
 
                 # DR08 prompting is useful in all modes that run plan loop
-                if self.v_prompt_rbox.get() and mode in ("plan_only", "pitaya_only", "full_experiment"):
+                if self.v_prompt_rbox.get() and mode in ("plan_only", "epos_plan", "full_run"):
                     exec_cmd.append("--prompt-rbox")
 
                 if self.v_no_sleep.get():
@@ -1416,26 +863,22 @@ class App(tk.Tk):
                 # Mode mapping
                 if mode == "plan_only":
                     # simulate everything, no hardware connections
-                    exec_cmd += ["--dry-run", "--use-epos", "--points", str(points_n)]
+                    exec_cmd += ["--dry-run", "--use-epos", "--no-pitaya", "--points", str(points_n)]
                     interactive = True
 
-                elif mode == "pitaya_only":
-                    # real acquisition without motor motion
-                    exec_cmd += ["--points", str(points_n)]
-                    interactive = True
-
-                elif mode == "epos_only":
+                elif mode == "epos_plan":
                     # real motor moves, but no pitaya acquisition
                     exec_cmd += ["--use-epos", "--no-pitaya", "--points", str(points_n)]
                     interactive = True
 
-                elif mode == "full_experiment":
+                elif mode == "full_run":
                     # real motor + real pitaya acquisition
                     exec_cmd += ["--use-epos", "--points", str(points_n)]
                     interactive = True
 
                 else:
-                    self.log("\n[UI] Unknown mode selected.\n")
+                    # Shouldn't happen; jog has its own button
+                    self.log("\n[UI] Unknown mode for Run. Use the Jog button for EPOS Safe Jog.\n")
                     return
 
                 rc2 = self._run_cmd_stream(exec_cmd, env, interactive=interactive)
@@ -1443,32 +886,6 @@ class App(tk.Tk):
                     self.log("\n[Stopped]\n")
                     return
                 self.log(f"\n[Executor finished: rc={rc2}]\n")
-
-                # 4) run embedded data treatment (inside this UI, no external popup)
-                try:
-                    csv_dir = run_dir / "csv"
-                    has_csv = csv_dir.exists() and any(csv_dir.glob("*.csv"))
-
-                    if rc2 != 0:
-                        self.log("\n[Data treatment] skipped (executor failed).\n")
-                        self.after(0, lambda: self.v_treatment_status.set("Skipped (executor failed)."))
-                    elif not has_csv:
-                        self.log("\n[Data treatment] skipped (no CSV data generated; likely EPOS-only or dry-run mode).\n")
-                        self.after(0, lambda: self.v_treatment_status.set("Skipped (no CSV data)."))
-                    else:
-                        self.after(0, lambda: self.v_treatment_status.set("Running treatment..."))
-                        self.log("\n[Data treatment] running (embedded)…\n")
-                        summary = self._run_treatment_for_dir(run_dir)
-                        self.summary_csv = summary
-                        self.log(f"[Data treatment] done. Summary: {summary}\n")
-                        self.after(0, lambda: self.v_treatment_status.set("Treatment complete."))
-                except Exception as e:
-                    self.log(f"\n[Data treatment] failed: {e}\n")
-                    self.after(0, lambda: self.v_treatment_status.set(f"Treatment failed: {e}"))
-
-                # Refresh UI views
-                self.after(0, self._load_summary_table)
-                self.after(0, self._refresh_plots_list)
 
             except Exception as e:
                 self.log(f"\n[UI error] {e}\n")
@@ -1493,3 +910,22 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
+
+"""
+NOTE: executor.py must support --rpm-limit for this UI.
+
+Minimal patch for executor.py:
+
+1) add arg:
+    ap.add_argument("--rpm-limit", type=int, default=1000,
+                    help="Hard safety cap on commanded rpm (runtime clamp).")
+
+2) clamp where rpm_out computed in EPOS loop:
+    rpm_out = epos_rpm_override if epos_rpm_override > 0 else rpm_out_plan
+    rpm_out = max(0, min(rpm_out, int(args.rpm_limit)))
+
+3) also clamp manual jog rpm before calling epos.jog_start:
+    jog_rpm = max(0, min(args.epos_jog_rpm, int(args.rpm_limit)))
+
+This makes it impossible to ever command > rpm-limit from UI or CLI.
+"""

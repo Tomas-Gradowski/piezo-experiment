@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from ctypes import cdll,CDLL, byref, c_uint, c_short, c_int
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 
 class Direction(str, Enum):
@@ -102,9 +102,26 @@ class EposDriver:
             raise RuntimeError(f"VCS_GetDeviceErrorCode failed (err={self.pErrorCode.value})")
 
         if self.pDeviceErrorCode.value != 0:
-            raise RuntimeError(
-                f"EPOS device error={self.pDeviceErrorCode.value} (err={self.pErrorCode.value})"
-            )
+            # Try fault recovery once (common after undervoltage/quick-stop events).
+            recovered = False
+            if hasattr(self.epos, "VCS_ClearFault"):
+                try:
+                    self.epos.VCS_ClearFault(self.keyhandle, self.cfg.node_id, byref(self.pErrorCode))
+                    ret2 = self.epos.VCS_GetDeviceErrorCode(
+                        self.keyhandle,
+                        self.cfg.node_id,
+                        1,
+                        byref(self.pDeviceErrorCode),
+                        byref(self.pErrorCode),
+                    )
+                    recovered = (ret2 != 0 and self.pDeviceErrorCode.value == 0)
+                except Exception:
+                    recovered = False
+
+            if not recovered:
+                raise RuntimeError(
+                    f"EPOS device error={self.pDeviceErrorCode.value} (err={self.pErrorCode.value})"
+                )
 
         # Enable
         self.epos.VCS_SetEnableState(self.keyhandle, self.cfg.node_id, byref(self.pErrorCode))
@@ -164,7 +181,13 @@ class EposDriver:
         self._require_open()
         self.epos.VCS_HaltVelocityMovement(self.keyhandle, self.cfg.node_id, byref(self.pErrorCode))
 
-    def move_for_time(self, duration_s: float, rpm_output: int, direction: Direction = Direction.CW) -> int:
+    def move_for_time(
+        self,
+        duration_s: float,
+        rpm_output: int,
+        direction: Direction = Direction.CW,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> int:
         """
         Spin for duration_s seconds at rpm_output (output rpm), then stop.
         Matches your old move_for_time logic. :contentReference[oaicite:3]{index=3}
@@ -173,6 +196,8 @@ class EposDriver:
         motor_rpm = self.jog_start(rpm_output=rpm_output, direction=direction)
         t0 = time.time()
         while (time.time() - t0) < float(duration_s):
+            if should_stop is not None and should_stop():
+                break
             # keep commanding (like your old loop)
             self.epos.VCS_MoveWithVelocity(self.keyhandle, self.cfg.node_id, int(motor_rpm), byref(self.pErrorCode))
             time.sleep(0.01)

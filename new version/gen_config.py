@@ -124,7 +124,10 @@ class EposPlan:
     lib_path: str
     node_id: int
     gear_reduction: int
+    one_turn: int
     max_rpm: int
+    accel: int
+    decel: int
     direction: Literal["cw", "ccw"]
     alternate: bool
     rest_s: float
@@ -221,7 +224,7 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
                 "total_r_ohm": effective_resistance_total(r, cfg.osc_r_ohm),
                 "decimation": dec,
                 "pitaya_setup": pitaya_setup_commands(cfg, dec),
-                "pitaya_queries": ["ACQ:commandUR1:DATA?", "ACQ:SOUR2:DATA?"],
+                "pitaya_queries": ["ACQ:SOUR1:DATA?", "ACQ:SOUR2:DATA?"],
             })
             idx += 1
 
@@ -278,7 +281,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-lib", default="/home/tomas/thesis/epos/EPOS-Linux-Library-En/EPOS_Linux_Library/lib/intel/x86_64/libEposCmd.so.6.8.1.0")
     ap.add_argument("--epos-node-id", type=int, default=1)
     ap.add_argument("--epos-gear", type=int, default=18)
-    ap.add_argument("--epos-max-rpm", type=int, default=8)
+    ap.add_argument("--epos-one-turn", type=int, default=73728, help="EPOS increments per mechanical output turn")
+    ap.add_argument("--epos-max-rpm", type=int, default=5000)
+    ap.add_argument("--epos-accel", type=int, default=250000, help="EPOS velocity profile acceleration")
+    ap.add_argument("--epos-decel", type=int, default=250000, help="EPOS velocity profile deceleration")
     ap.add_argument("--epos-direction", choices=["cw", "ccw"], default="cw")
     ap.add_argument("--epos-alternate", action="store_true")
     ap.add_argument("--epos-rest-s", type=float, default=0.0)
@@ -333,7 +339,10 @@ def main() -> None:
         lib_path=args.epos_lib,
         node_id=args.epos_node_id,
         gear_reduction=args.epos_gear,
+        one_turn=int(args.epos_one_turn),
         max_rpm=args.epos_max_rpm,
+        accel=int(args.epos_accel),
+        decel=int(args.epos_decel),
         direction=args.epos_direction,
         alternate=bool(args.epos_alternate),
         rest_s=float(args.epos_rest_s),
