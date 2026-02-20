@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import math
+import json
 import queue
 import threading
 import subprocess
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from devices.pitaya_scpi import scpi as PitayaSCPI
 
 # Optional: plots and images
 try:
@@ -117,6 +119,46 @@ class App(tk.Tk):
             "stop": "Status.Stop.TLabel",
         }
         self.lbl_status.configure(style=style_map.get(kind, "Status.Idle.TLabel"))
+
+    def _pitaya_target(self) -> tuple[str, int, float]:
+        host = "rp-f06549.local"
+        port = 5000
+        timeout = 3.0
+        try:
+            if self.last_run_dir is not None:
+                cfg_path = self.last_run_dir / "experiment_config.json"
+                if cfg_path.exists():
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    p = cfg.get("pitaya", {})
+                    host = str(p.get("host", host))
+                    port = int(p.get("port", port))
+        except Exception:
+            pass
+        return host, port, timeout
+
+    def on_probe_pitaya(self) -> None:
+        self.btn_probe_pitaya.configure(state="disabled")
+        self.v_pitaya_status.set("Probing Pitaya...")
+        host, port, timeout = self._pitaya_target()
+        self.log(f"[Pitaya probe] target={host}:{port} timeout={timeout}s\n")
+
+        def work() -> None:
+            try:
+                rp = PitayaSCPI(host=host, port=port, timeout=timeout)
+                try:
+                    rp.run_commands(["ACQ:RST"])
+                    dec = rp.query("ACQ:DEC?")
+                    self.log(f"[Pitaya probe] connected {host}:{port} ACQ:DEC? => {dec.strip()}\n")
+                    self.after(0, lambda: self.v_pitaya_status.set(f"Connected: {host}:{port}"))
+                finally:
+                    rp.close()
+            except Exception as e:
+                self.log(f"[Pitaya probe] failed: {e}\n")
+                self.after(0, lambda: self.v_pitaya_status.set(f"Probe failed: {e}"))
+            finally:
+                self.after(0, lambda: self.btn_probe_pitaya.configure(state="normal"))
+
+        threading.Thread(target=work, daemon=True).start()
 
 
 
@@ -502,6 +544,40 @@ class App(tk.Tk):
         self.pb.configure(mode="determinate", maximum=max(1, int(total_points)))
         self.v_progress.set(0)
 
+    def _log_epos_safety_envelope(self, run_dir: Path, rpm_limit: int) -> None:
+        """
+        Log the effective EPOS command caps before executor starts.
+        """
+        try:
+            cfg_path = run_dir / "experiment_config.json"
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            e = cfg.get("epos", {})
+
+            gear = max(1, int(e.get("gear_reduction", 18)))
+            motor_max_rpm = max(1, int(e.get("max_rpm", 5000)))
+            max_out_from_motor = max(1, motor_max_rpm // gear)
+
+            direction = str(e.get("direction", "cw"))
+            alternate = bool(e.get("alternate", False))
+            rpm_override = int(e.get("rpm_override", 0))
+            eff_out_cap = min(int(rpm_limit), max_out_from_motor)
+
+            self.log("\n[EPOS safety] pre-run envelope\n")
+            self.log(f"[EPOS safety] gear_reduction={gear} motor_max_rpm={motor_max_rpm}\n")
+            self.log(f"[EPOS safety] output cap from motor limit={max_out_from_motor} rpm\n")
+            self.log(f"[EPOS safety] runtime --rpm-limit={rpm_limit} rpm_out\n")
+            self.log(f"[EPOS safety] effective output cap=min({rpm_limit}, {max_out_from_motor})={eff_out_cap} rpm_out\n")
+
+            if rpm_override > 0:
+                eff_override = min(rpm_override, eff_out_cap)
+                self.log(f"[EPOS safety] rpm_override={rpm_override} -> effective commanded rpm_out={eff_override}\n")
+            else:
+                self.log("[EPOS safety] rpm_override=0 (plan-derived rpm_out per point)\n")
+
+            self.log(f"[EPOS safety] direction={direction} alternate={alternate}\n")
+        except Exception as e:
+            self.log(f"[EPOS safety] could not compute envelope: {e}\n")
+
     def _advance_progress_from_log(self, chunk: str) -> None:
         # Parse lines like: "--- Executing point 0 ---"
         import re
@@ -828,7 +904,7 @@ class App(tk.Tk):
 
         row_maxrpm = ttk.Frame(opt)
         row_maxrpm.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_maxrpm, text="EPOS commandedax RPM cap (plan)").pack(side="left")
+        ttk.Label(row_maxrpm, text="EPOS motor max RPM (driver clamp)").pack(side="left")
         ttk.Entry(row_maxrpm, style="Dark.TEntry",textvariable=self.v_epos_max_rpm, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
@@ -868,6 +944,10 @@ class App(tk.Tk):
         self.btn_continue.pack(side="left", padx=10)
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.on_stop, state="disabled", style="Stop.TButton")
         self.btn_stop.pack(side="left", padx=10)
+        self.btn_probe_pitaya = ttk.Button(btns, text="Probe Pitaya", command=self.on_probe_pitaya)
+        self.btn_probe_pitaya.pack(side="left", padx=10)
+        self.v_pitaya_status = tk.StringVar(value="Pitaya: not probed")
+        ttk.Label(btns, textvariable=self.v_pitaya_status).pack(side="left", padx=(8, 0))
 
         status = ttk.Frame(self.tab_run_main, padding=(10, 10))
         status.pack(fill="x")
@@ -1398,6 +1478,8 @@ class App(tk.Tk):
                 # 2) find latest run dir
                 run_dir = find_latest_run_dir(GENERATED, ga.sample_name)
                 self.log(f"\n[Using run-dir: {run_dir}]\n")
+                if mode in ("epos_only", "full_experiment"):
+                    self._log_epos_safety_envelope(run_dir=run_dir, rpm_limit=rpm_limit)
 
                 # 3) run executor based on mode
                 exec_cmd = [sys.executable, str(EXEC), "--run-dir", str(run_dir)]

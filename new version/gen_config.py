@@ -125,7 +125,7 @@ class EposPlan:
     node_id: int
     gear_reduction: int
     one_turn: int
-    max_rpm: int
+    max_rpm: int  # motor-shaft RPM clamp at driver level
     accel: int
     decel: int
     direction: Literal["cw", "ccw"]
@@ -202,7 +202,10 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
                 rpm_out = int(cfg.epos.rpm_override)
             else:
                 rpm_out = int(round(motor_hz * 60.0))  # 1 rev per cycle assumption
-            rpm_out = min(rpm_out, int(cfg.epos.max_rpm))
+            # Convert motor max RPM to an output-shaft cap using gear reduction.
+            # This avoids mixing motor-RPM and output-RPM units.
+            max_out_rpm_from_motor = max(1, int(cfg.epos.max_rpm) // max(1, int(cfg.epos.gear_reduction)))
+            rpm_out = min(rpm_out, max_out_rpm_from_motor)
 
             # Pitaya sampling intent (NOT the motor knob directly)
             signal_hz = float(motor_hz) * float(cfg.pitaya.signal_hz_multiplier)
