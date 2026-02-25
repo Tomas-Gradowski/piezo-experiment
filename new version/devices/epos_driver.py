@@ -24,9 +24,9 @@ class EposConfig:
     port: bytes = b"USB0"
 
     # Mechanics
-    gear_reduction: int = 18          # motor_rpm = output_rpm * gear_reduction
+    gear_reduction: int = 1           # motor_rpm = output_rpm * gear_reduction
     one_turn: int = 73728             # increments per mechanical turn (your constant)
-    max_rpm: int = 8000               # motor max rpm (after gear multiplication)
+    max_output_rpm: int = 2000        # output max rpm (before gear multiplication)
 
     # Motion defaults
     accel: int = 10000
@@ -63,15 +63,39 @@ class EposDriver:
 
     def _clamp_motor_rpm(self, motor_rpm: int) -> int:
         motor_rpm = int(motor_rpm)
-        if motor_rpm > self.cfg.max_rpm:
-            motor_rpm = self.cfg.max_rpm
-        if motor_rpm < -self.cfg.max_rpm:
-            motor_rpm = -self.cfg.max_rpm
+        max_motor = int(self.cfg.max_output_rpm) * int(self.cfg.gear_reduction)
+        if max_motor <= 0:
+            max_motor = 1
+        if motor_rpm > max_motor:
+            motor_rpm = max_motor
+        if motor_rpm < -max_motor:
+            motor_rpm = -max_motor
         return motor_rpm
 
     def _dir_sign(self, direction: Direction) -> int:
         # Your legacy main.py inverts sign for CW in velocity mode. :contentReference[oaicite:1]{index=1}
         return -1 if direction == Direction.CW else 1
+
+    def _set_velocity_profile(self) -> None:
+        """
+        Apply velocity profile accel/decel if the EPOS library supports it.
+        This helps make stop behavior predictable in velocity mode.
+        """
+        if self.epos is None:
+            return
+        if not hasattr(self.epos, "VCS_SetVelocityProfile"):
+            return
+        try:
+            self.epos.VCS_SetVelocityProfile(
+                self.keyhandle,
+                self.cfg.node_id,
+                int(self.cfg.accel),
+                int(self.cfg.decel),
+                byref(self.pErrorCode),
+            )
+        except Exception:
+            # Best-effort; ignore if the symbol exists but call fails.
+            pass
 
     # -----------------------------
     # Lifecycle
@@ -169,6 +193,7 @@ class EposDriver:
         """
         self._require_open()
         self.epos.VCS_ActivateProfileVelocityMode(self.keyhandle, self.cfg.node_id, byref(self.pErrorCode))
+        self._set_velocity_profile()
 
         motor_rpm = int(rpm_output) * int(self.cfg.gear_reduction)
         motor_rpm = self._clamp_motor_rpm(motor_rpm)
@@ -193,6 +218,7 @@ class EposDriver:
         Matches your old move_for_time logic. :contentReference[oaicite:3]{index=3}
         """
         self._require_open()
+        self._set_velocity_profile()
         motor_rpm = self.jog_start(rpm_output=rpm_output, direction=direction)
         t0 = time.time()
         while (time.time() - t0) < float(duration_s):

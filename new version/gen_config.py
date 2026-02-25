@@ -125,7 +125,8 @@ class EposPlan:
     node_id: int
     gear_reduction: int
     one_turn: int
-    max_rpm: int  # motor-shaft RPM clamp at driver level
+    max_output_rpm: int  # output-shaft RPM clamp (user-facing)
+    max_rpm: int  # legacy motor-shaft RPM clamp (for backward compatibility)
     accel: int
     decel: int
     direction: Literal["cw", "ccw"]
@@ -141,10 +142,10 @@ class ExperimentConfig:
     output_dir: str
 
     # sweeps
-    min_motor_hz: float
-    max_motor_hz: float
-    motor_points: int
-    motor_scale: Scale
+    min_output_hz: float
+    max_output_hz: float
+    output_points: int
+    output_scale: Scale
 
     min_r_ohm: float
     max_r_ohm: float
@@ -186,8 +187,49 @@ def pitaya_setup_commands(cfg: ExperimentConfig, decimation: int) -> List[str]:
         "ACQ:TRIG NOW",
     ]
 
+def normalize_pitaya_queries(queries: List[str]) -> List[str]:
+    # Legacy expects CH1=pressure and CH2=voltage.
+    if not queries or len(queries) < 2:
+        return ["ACQ:SOUR1:DATA?", "ACQ:SOUR2:DATA?"]
+
+    q1 = (queries[0] or "").strip()
+    q2 = (queries[1] or "").strip()
+
+    # Fix known typo seen in older generated plans.
+    if "commandUR1" in q1:
+        q1 = "ACQ:SOUR1:DATA?"
+    if "commandUR2" in q2:
+        q2 = "ACQ:SOUR2:DATA?"
+
+    if "SOUR1" not in q1.upper():
+        q1 = "ACQ:SOUR1:DATA?"
+    if "SOUR2" not in q2.upper():
+        q2 = "ACQ:SOUR2:DATA?"
+
+    return [q1, q2]
+
+
+def validate_plan_points(points: List[Dict[str, Any]]) -> None:
+    # Fail fast on malformed SCPI or missing acquisition commands.
+    for p in points:
+        setup = p.get("pitaya_setup", [])
+        queries = p.get("pitaya_queries", [])
+        if not setup or not isinstance(setup, list):
+            raise ValueError(f"Point {p.get('index')} missing pitaya_setup")
+        if not queries or not isinstance(queries, list) or len(queries) < 2:
+            raise ValueError(f"Point {p.get('index')} missing pitaya_queries")
+
+        normalized = normalize_pitaya_queries(queries)
+        p["pitaya_queries"] = normalized
+        # Ensure DEC and TRIG are present; other fields are guaranteed by generator.
+        upper = [c.upper() for c in setup]
+        if not any(c.startswith("ACQ:DEC ") for c in upper):
+            raise ValueError(f"Point {p.get('index')} missing ACQ:DEC in pitaya_setup")
+        if not any(c.startswith("ACQ:TRIG:DLY ") for c in upper):
+            raise ValueError(f"Point {p.get('index')} missing ACQ:TRIG:DLY in pitaya_setup")
+
 def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
-    motor_hzs = generate_array(cfg.min_motor_hz, cfg.max_motor_hz, cfg.motor_points, cfg.motor_scale)
+    output_hzs = generate_array(cfg.min_output_hz, cfg.max_output_hz, cfg.output_points, cfg.output_scale)
     rbox = build_dr08_resistance_sweep(cfg.min_r_ohm, cfg.max_r_ohm, cfg.r_points, cfg.r_scale)
 
     points = []
@@ -196,19 +238,20 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
         r = r_entry["rbox_ohm"]
         digits = r_entry["digits"]
 
-        for f_idx, motor_hz in enumerate(motor_hzs):
-            # EPOS target
+        for f_idx, output_hz in enumerate(output_hzs):
+            # EPOS target (output frequency)
             if cfg.epos.rpm_override > 0:
                 rpm_out = int(cfg.epos.rpm_override)
             else:
-                rpm_out = int(round(motor_hz * 60.0))  # 1 rev per cycle assumption
-            # Convert motor max RPM to an output-shaft cap using gear reduction.
-            # This avoids mixing motor-RPM and output-RPM units.
-            max_out_rpm_from_motor = max(1, int(cfg.epos.max_rpm) // max(1, int(cfg.epos.gear_reduction)))
-            rpm_out = min(rpm_out, max_out_rpm_from_motor)
+                rpm_out = int(round(output_hz * 60.0))  # 1 rev per cycle assumption
+            # Output RPM cap (user-facing). Fallback to legacy motor-RPM if needed.
+            max_out_rpm = int(cfg.epos.max_output_rpm) if int(cfg.epos.max_output_rpm) > 0 else 0
+            if max_out_rpm <= 0:
+                max_out_rpm = max(1, int(cfg.epos.max_rpm) // max(1, int(cfg.epos.gear_reduction)))
+            rpm_out = min(rpm_out, max_out_rpm)
 
             # Pitaya sampling intent (NOT the motor knob directly)
-            signal_hz = float(motor_hz) * float(cfg.pitaya.signal_hz_multiplier)
+            signal_hz = float(output_hz) * float(cfg.pitaya.signal_hz_multiplier)
             dec = compute_decimation(cfg, signal_hz)
 
             points.append({
@@ -216,8 +259,8 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
                 "r_index": r_idx,
                 "f_index": f_idx,
 
-                "motor_hz": float(motor_hz),
-                "rpm_out": int(rpm_out),
+                "output_hz": float(output_hz),
+                "output_rpm": int(rpm_out),
                 "signal_hz": float(signal_hz),
 
                 "rbox_ohm": r,
@@ -227,12 +270,13 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
                 "total_r_ohm": effective_resistance_total(r, cfg.osc_r_ohm),
                 "decimation": dec,
                 "pitaya_setup": pitaya_setup_commands(cfg, dec),
-                "pitaya_queries": ["ACQ:SOUR1:DATA?", "ACQ:SOUR2:DATA?"],
+                "pitaya_queries": normalize_pitaya_queries(["ACQ:SOUR1:DATA?", "ACQ:SOUR2:DATA?"]),
             })
             idx += 1
 
+    validate_plan_points(points)
     return {
-        "motor_hz": motor_hzs,
+        "output_hz": output_hzs,
         "rbox": rbox,
         "grid_points": points,
     }
@@ -245,7 +289,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Generate experiment config + per-point Pitaya command plan (old UI parameters via CLI)."
     )
-    ap.add_argument("--signal_hz_multiplier", type=float, default=1.0, help="Pitaya expected signal_hz = motor_hz * multiplier (for decimation)")
+    ap.add_argument("--signal_hz_multiplier", type=float, default=1.0, help="Pitaya expected signal_hz = output_hz * multiplier (for decimation)")
     # Meta / output
     ap.add_argument("--sample-name", required=True, help="Equivalent to textBoxSampleName")
     ap.add_argument("--out-dir", default="generated_configs", help="Base output folder (equiv. textBoxFolder)")
@@ -283,11 +327,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-enabled", action="store_true")
     ap.add_argument("--epos-lib", default="/home/tomas/thesis/epos/EPOS-Linux-Library-En/EPOS_Linux_Library/lib/intel/x86_64/libEposCmd.so.6.8.1.0")
     ap.add_argument("--epos-node-id", type=int, default=1)
-    ap.add_argument("--epos-gear", type=int, default=18)
+    ap.add_argument("--epos-gear", type=int, default=1)
     ap.add_argument("--epos-one-turn", type=int, default=73728, help="EPOS increments per mechanical output turn")
-    ap.add_argument("--epos-max-rpm", type=int, default=5000)
-    ap.add_argument("--epos-accel", type=int, default=250000, help="EPOS velocity profile acceleration")
-    ap.add_argument("--epos-decel", type=int, default=250000, help="EPOS velocity profile deceleration")
+    ap.add_argument("--epos-max-rpm", type=int, default=2000, help="Output-shaft RPM cap (before gear reduction)")
+    ap.add_argument("--epos-accel", type=int, default=10000, help="EPOS velocity profile acceleration")
+    ap.add_argument("--epos-decel", type=int, default=10000, help="EPOS velocity profile deceleration")
     ap.add_argument("--epos-direction", choices=["cw", "ccw"], default="cw")
     ap.add_argument("--epos-alternate", action="store_true")
     ap.add_argument("--epos-rest-s", type=float, default=0.0)
@@ -337,13 +381,15 @@ def main() -> None:
         gain_ch2=args.gain_ch2,
         signal_hz_multiplier=float(args.signal_hz_multiplier),
     )
+    max_motor_rpm = int(args.epos_max_rpm) * int(args.epos_gear)
     epos_plan = EposPlan(
         enabled=bool(args.epos_enabled),
         lib_path=args.epos_lib,
         node_id=args.epos_node_id,
         gear_reduction=args.epos_gear,
         one_turn=int(args.epos_one_turn),
-        max_rpm=args.epos_max_rpm,
+        max_output_rpm=int(args.epos_max_rpm),
+        max_rpm=max_motor_rpm,
         accel=int(args.epos_accel),
         decel=int(args.epos_decel),
         direction=args.epos_direction,
@@ -356,10 +402,10 @@ def main() -> None:
         created_at=datetime.now().isoformat(timespec="seconds"),
         output_dir=str(out_path),
 
-        min_motor_hz=args.min_freq,
-        max_motor_hz=args.max_freq,
-        motor_points=args.freq_points,
-        motor_scale=args.freq_scale,
+        min_output_hz=args.min_freq,
+        max_output_hz=args.max_freq,
+        output_points=args.freq_points,
+        output_scale=args.freq_scale,
 
         min_r_ohm=args.min_r,
         max_r_ohm=args.max_r,

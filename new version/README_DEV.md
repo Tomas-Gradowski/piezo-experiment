@@ -27,7 +27,7 @@ This document explains the internal structure, configuration formats, and common
 - Analysis constants (pressure scale, oscilloscope input resistance).
 
 `measurement_plan.json` includes a list of `grid_points` containing:
-- The specific `motor_hz`, `rbox_ohm`, `decimation`, and derived parameters.
+- The specific `output_hz`, `rbox_ohm`, `decimation`, and derived parameters.
 - `pitaya_setup` and `pitaya_queries` command lists for the point.
 
 If you add fields in `gen_config.py`, make sure `executor.py` reads them consistently.

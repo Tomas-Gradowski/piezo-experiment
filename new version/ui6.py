@@ -23,8 +23,9 @@ try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 except Exception:
     Figure = None
-    FigureCanvasTkAgg = None
+FigureCanvasTkAgg = None
 
+HARD_MAX_OUTPUT_RPM = 2000
 
 
 # -----------------------------
@@ -125,13 +126,21 @@ class App(tk.Tk):
         port = 5000
         timeout = 3.0
         try:
+            ui_host = self.v_pitaya_host.get().strip()
+            ui_port = self.v_pitaya_port.get().strip()
+            if ui_host:
+                host = ui_host
+            if ui_port:
+                port = int(ui_port)
             if self.last_run_dir is not None:
                 cfg_path = self.last_run_dir / "experiment_config.json"
                 if cfg_path.exists():
                     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
                     p = cfg.get("pitaya", {})
-                    host = str(p.get("host", host))
-                    port = int(p.get("port", port))
+                    if not ui_host:
+                        host = str(p.get("host", host))
+                    if not ui_port:
+                        port = int(p.get("port", port))
         except Exception:
             pass
         return host, port, timeout
@@ -154,7 +163,7 @@ class App(tk.Tk):
                     rp.close()
             except Exception as e:
                 self.log(f"[Pitaya probe] failed: {e}\n")
-                self.after(0, lambda: self.v_pitaya_status.set(f"Probe failed: {e}"))
+                self.after(0, lambda e=e: self.v_pitaya_status.set(f"Probe failed: {e}"))
             finally:
                 self.after(0, lambda: self.btn_probe_pitaya.configure(state="normal"))
 
@@ -176,19 +185,19 @@ class App(tk.Tk):
                 self.after(0, self._refresh_plots_list)
                 self.after(0, self._load_summary_table)
 
-        # Try to catch CSV saves from executor log
-        # common patterns: "Saving CSV to ..." or "Saved ...csv" or any ".csv" path
-        m2 = re.search(r"(/[^\s]+\.csv)", chunk)
+        # Try to catch CSV saves from executor log.
+        # Allow spaces in absolute paths (e.g. ".../new version/...csv").
+        m2 = re.search(r"(/.+?\.csv)\b", chunk)
         if m2:
-            p = Path(m2.group(1))
+            p = Path(m2.group(1).strip().strip("'\""))
             if p.exists():
                 self.last_csv = p
                 self.after(0, self._kick_live_update)
 
         # Data treatment might log where it wrote summary table
-        m3 = re.search(r"SUMMARY_CSV:\s*(/[^\s]+\.csv)", chunk)
+        m3 = re.search(r"SUMMARY_CSV:\s*(/.+?\.csv)\b", chunk)
         if m3:
-            p = Path(m3.group(1))
+            p = Path(m3.group(1).strip().strip("'\""))
             if p.exists():
                 self.summary_csv = p
                 self.after(0, self._load_summary_table)
@@ -400,7 +409,7 @@ class App(tk.Tk):
                 self.after(0, lambda: self.main_tabs.select(self.tab_analysis_main))
             except Exception as e:
                 self.log(f"[Data treatment] failed: {e}\n")
-                self.after(0, lambda: self.v_treatment_status.set(f"Treatment failed: {e}"))
+                self.after(0, lambda e=e: self.v_treatment_status.set(f"Treatment failed: {e}"))
             finally:
                 self.after(0, lambda: self.btn_run_treatment.configure(state="normal"))
 
@@ -480,7 +489,7 @@ class App(tk.Tk):
     def _refresh_plots_list(self) -> None:
         self._plot_files = []
         self.plots_list.delete(0, "end")
-        self.plot_preview.configure(text="No plot selected.")
+        self.plot_preview.configure(image="", text="No plot selected.")
         self._plot_image_ref = None
 
         if self.last_run_dir is None or not self.last_run_dir.exists():
@@ -498,7 +507,7 @@ class App(tk.Tk):
                 self.plots_list.insert("end", p.name)
 
         if not pngs:
-            self.plot_preview.configure(text="No .png plots found under run-dir.")
+            self.plot_preview.configure(image="", text="No .png plots found under run-dir.")
 
     def _show_selected_plot(self) -> None:
         sel = self.plots_list.curselection()
@@ -553,26 +562,36 @@ class App(tk.Tk):
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             e = cfg.get("epos", {})
 
-            gear = max(1, int(e.get("gear_reduction", 18)))
-            motor_max_rpm = max(1, int(e.get("max_rpm", 5000)))
-            max_out_from_motor = max(1, motor_max_rpm // gear)
+            gear = max(1, int(e.get("gear_reduction", 1)))
+            if "max_output_rpm" in e:
+                max_out_rpm = max(1, int(e.get("max_output_rpm", 300)))
+            else:
+                motor_max_rpm = max(1, int(e.get("max_rpm", 5000)))
+                max_out_rpm = max(1, motor_max_rpm // gear)
+            if max_out_rpm > HARD_MAX_OUTPUT_RPM:
+                max_out_rpm = HARD_MAX_OUTPUT_RPM
+            motor_max_rpm = max_out_rpm * gear
 
             direction = str(e.get("direction", "cw"))
             alternate = bool(e.get("alternate", False))
             rpm_override = int(e.get("rpm_override", 0))
-            eff_out_cap = min(int(rpm_limit), max_out_from_motor)
+            eff_out_cap = min(int(rpm_limit), max_out_rpm, HARD_MAX_OUTPUT_RPM)
+            eff_motor_cap = eff_out_cap * gear
 
             self.log("\n[EPOS safety] pre-run envelope\n")
-            self.log(f"[EPOS safety] gear_reduction={gear} motor_max_rpm={motor_max_rpm}\n")
-            self.log(f"[EPOS safety] output cap from motor limit={max_out_from_motor} rpm\n")
+            self.log(f"[EPOS safety] gear_reduction={gear} (motor_rpm = output_rpm * gear)\n")
+            self.log(f"[EPOS safety] motor_max_rpm={motor_max_rpm}\n")
+            self.log(f"[EPOS safety] output_cap={max_out_rpm} rpm_out\n")
+            self.log(f"[EPOS safety] hard_output_cap={HARD_MAX_OUTPUT_RPM} rpm_out\n")
             self.log(f"[EPOS safety] runtime --rpm-limit={rpm_limit} rpm_out\n")
-            self.log(f"[EPOS safety] effective output cap=min({rpm_limit}, {max_out_from_motor})={eff_out_cap} rpm_out\n")
+            self.log(f"[EPOS safety] effective output cap=min({rpm_limit}, {max_out_rpm})={eff_out_cap} rpm_out\n")
+            self.log(f"[EPOS safety] effective motor cap={eff_motor_cap} rpm_motor\n")
 
             if rpm_override > 0:
                 eff_override = min(rpm_override, eff_out_cap)
                 self.log(f"[EPOS safety] rpm_override={rpm_override} -> effective commanded rpm_out={eff_override}\n")
             else:
-                self.log("[EPOS safety] rpm_override=0 (plan-derived rpm_out per point)\n")
+                self.log("[EPOS safety] rpm_override=0 (plan-derived output_rpm per point)\n")
 
             self.log(f"[EPOS safety] direction={direction} alternate={alternate}\n")
         except Exception as e:
@@ -781,13 +800,15 @@ class App(tk.Tk):
 
         # Plan knobs
         self.v_signal_mult = tk.StringVar(value="1.0")
+        self.v_pitaya_host = tk.StringVar(value="rp-f06549.local")
+        self.v_pitaya_port = tk.StringVar(value="5000")
 
         # EPOS plan fields (generator)
         self.v_epos_direction = tk.StringVar(value="cw")
         self.v_epos_alternate = tk.BooleanVar(value=False)
         self.v_epos_rest_s = tk.StringVar(value="0.0")
         self.v_epos_rpm_override = tk.StringVar(value="0")
-        self.v_epos_max_rpm = tk.StringVar(value="5000")  # plan cap
+        self.v_epos_max_rpm = tk.StringVar(value="2000")  # output rpm cap
 
         # Hardware toggles (generator side)
         self.v_gen_pitaya_enabled = tk.BooleanVar(value=True)
@@ -797,8 +818,8 @@ class App(tk.Tk):
         r = 0
         add_labeled(r, "Sample name", self.v_sample); r += 1
 
-        add_labeled(r, "Min motor freq (Hz)", self.v_min_freq); r += 1
-        add_labeled(r, "Max motor freq (Hz)", self.v_max_freq); r += 1
+        add_labeled(r, "Min output freq (Hz)", self.v_min_freq); r += 1
+        add_labeled(r, "Max output freq (Hz)", self.v_max_freq); r += 1
         add_labeled(r, "Motor points", self.v_freq_points); r += 1
         add_combo(r, "Motor scale", self.v_freq_scale, ("linear", "log")); r += 1
 
@@ -827,10 +848,10 @@ class App(tk.Tk):
         # Safety knobs
         ttk.Label(opt, text="Safety", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
 
-        self.v_rpm_limit = tk.StringVar(value="500")  # runtime safety clamp (executor)
+        self.v_rpm_limit = tk.StringVar(value="2000")  # runtime safety clamp (executor)
         row_lim = ttk.Frame(opt)
         row_lim.pack(anchor="w", pady=(4, 0))
-        ttk.Label(row_lim, text="RPM safety limit (executor)").pack(side="left")
+        ttk.Label(row_lim, text="RPM safety limit (executor, output)").pack(side="left")
         ttk.Entry(row_lim, textvariable=self.v_rpm_limit, style="Dark.TEntry",width=8).pack(side="left", padx=8)
 
         self.v_points = tk.StringVar(value="3")
@@ -874,9 +895,19 @@ class App(tk.Tk):
         # Generator toggles are derived automatically from selected mode.
         ttk.Label(opt, text="Hardware config is automatic from mode", font=("TkDefaultFont", 9, "italic")).pack(anchor="w")
 
+        row_pitaya = ttk.Frame(opt)
+        row_pitaya.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row_pitaya, text="Pitaya host").pack(side="left")
+        ttk.Entry(row_pitaya, style="Dark.TEntry", textvariable=self.v_pitaya_host, width=18).pack(side="left", padx=8)
+
+        row_pitaya2 = ttk.Frame(opt)
+        row_pitaya2.pack(anchor="w", pady=(4, 0))
+        ttk.Label(row_pitaya2, text="Pitaya port").pack(side="left")
+        ttk.Entry(row_pitaya2, style="Dark.TEntry", textvariable=self.v_pitaya_port, width=8).pack(side="left", padx=8)
+
         row_sig = ttk.Frame(opt)
         row_sig.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_sig, text="signal_hz_multiplier").pack(side="left")
+        ttk.Label(row_sig, text="signal_hz_multiplier (signal_hz = output_hz * multiplier)").pack(side="left")
         ttk.Entry(row_sig, style="Dark.TEntry",textvariable=self.v_signal_mult, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
@@ -899,12 +930,12 @@ class App(tk.Tk):
 
         row_rpm = ttk.Frame(opt)
         row_rpm.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_rpm, text="RPM override (0=auto)").pack(side="left")
+        ttk.Label(row_rpm, text="RPM override (output, 0=auto)").pack(side="left")
         ttk.Entry(row_rpm, style="Dark.TEntry",textvariable=self.v_epos_rpm_override, width=8).pack(side="left", padx=8)
 
         row_maxrpm = ttk.Frame(opt)
         row_maxrpm.pack(anchor="w", pady=(6, 0))
-        ttk.Label(row_maxrpm, text="EPOS motor max RPM (driver clamp)").pack(side="left")
+        ttk.Label(row_maxrpm, text="EPOS max output RPM (driver cap, output)").pack(side="left")
         ttk.Entry(row_maxrpm, style="Dark.TEntry",textvariable=self.v_epos_max_rpm, width=8).pack(side="left", padx=8)
 
         ttk.Separator(opt, orient="horizontal").pack(fill="x", pady=8)
@@ -923,7 +954,7 @@ class App(tk.Tk):
 
         jog_row2 = ttk.Frame(opt)
         jog_row2.pack(anchor="w", pady=(4, 0))
-        ttk.Label(jog_row2, text="RPM").pack(side="left")
+        ttk.Label(jog_row2, text="RPM (output)").pack(side="left")
         ttk.Entry(jog_row2, style="Dark.TEntry",textvariable=self.v_jog_rpm, width=8).pack(side="left", padx=6)
 
         jog_row3 = ttk.Frame(opt)
@@ -1314,8 +1345,8 @@ class App(tk.Tk):
             return
 
         try:
-            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 5000)
-            rpm = self._parse_int(self.v_jog_rpm.get(), "Jog RPM", 1, 5000)
+            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit (output)", 1, 2000)
+            rpm = self._parse_int(self.v_jog_rpm.get(), "Jog RPM (output)", 1, 2000)
             secs = self._parse_float(self.v_jog_seconds.get(), "Jog seconds", 0.01, 60.0)
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
@@ -1375,9 +1406,9 @@ class App(tk.Tk):
         try:
             ga = GenArgs(
                 sample_name=self.v_sample.get().strip(),
-                min_freq=self._parse_float(self.v_min_freq.get(), "Min freq", 1e-6),
-                max_freq=self._parse_float(self.v_max_freq.get(), "Max freq", 1e-6),
-                freq_points=self._parse_int(self.v_freq_points.get(), "Freq points", 1, 10_000),
+                min_freq=self._parse_float(self.v_min_freq.get(), "Min output freq", 1e-6),
+                max_freq=self._parse_float(self.v_max_freq.get(), "Max output freq", 1e-6),
+                freq_points=self._parse_int(self.v_freq_points.get(), "Output freq points", 1, 10_000),
                 freq_scale=self.v_freq_scale.get().strip(),
 
                 min_r=self._parse_float(self.v_min_r.get(), "Min R", 0.1),
@@ -1395,14 +1426,14 @@ class App(tk.Tk):
                 epos_direction=self.v_epos_direction.get(),
                 epos_alternate=bool(self.v_epos_alternate.get()),
                 epos_rest_s=self._parse_float(self.v_epos_rest_s.get(), "Rest seconds", 0.0, 60.0),
-                epos_rpm_override=self._parse_int(self.v_epos_rpm_override.get(), "RPM override", 0, 5000),
-                epos_max_rpm=self._parse_int(self.v_epos_max_rpm.get(), "EPOS max RPM cap", 1, 5000),
+                epos_rpm_override=self._parse_int(self.v_epos_rpm_override.get(), "RPM override (output)", 0, 2000),
+                epos_max_rpm=self._parse_int(self.v_epos_max_rpm.get(), "EPOS max output RPM cap", 1, 2000),
 
                 signal_hz_multiplier=self._parse_float(self.v_signal_mult.get(), "signal_hz_multiplier", 0.0001, 1e9),
             )
 
             points_n = self._parse_int(self.v_points.get(), "Plan points", 1, 1_000_000)
-            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit", 1, 5000)
+            rpm_limit = self._parse_int(self.v_rpm_limit.get(), "RPM safety limit (output)", 1, 2000)
             self._reset_progress(points_n)
             self._set_status("RUNNING", "running")
         except Exception as e:
@@ -1410,7 +1441,7 @@ class App(tk.Tk):
             return
 
         if ga.max_freq < ga.min_freq:
-            messagebox.showerror("Invalid input", "Max freq must be >= Min freq.")
+            messagebox.showerror("Invalid input", "Max output freq must be >= Min output freq.")
             return
         if ga.max_r < ga.min_r:
             messagebox.showerror("Invalid input", "Max R must be >= Min R.")
@@ -1418,7 +1449,7 @@ class App(tk.Tk):
 
         # In safe modes, force low limits unless user explicitly changed
         if mode in ("epos_only", "full_experiment") and rpm_limit > 1000:
-            if not messagebox.askyesno("Safety check", f"RPM safety limit is {rpm_limit}. Continue?"):
+            if not messagebox.askyesno("Safety check", f"RPM safety limit (output) is {rpm_limit}. Continue?"):
                 return
 
         self.btn_run.configure(state="disabled")
@@ -1453,6 +1484,12 @@ class App(tk.Tk):
 
                 if ga.pitaya_enabled:
                     gen_cmd.append("--pitaya-enabled")
+                    pitaya_host = self.v_pitaya_host.get().strip()
+                    pitaya_port = self.v_pitaya_port.get().strip()
+                    if pitaya_host:
+                        gen_cmd += ["--pitaya-host", pitaya_host]
+                    if pitaya_port:
+                        gen_cmd += ["--pitaya-port", pitaya_port]
 
                 if ga.epos_enabled:
                     gen_cmd += [
