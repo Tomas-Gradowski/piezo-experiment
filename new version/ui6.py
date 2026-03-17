@@ -16,14 +16,16 @@ from tkinter import ttk, messagebox
 from devices.pitaya_scpi import scpi as PitayaSCPI
 
 # Optional: plots and images
+MPL_IMPORT_ERROR: str | None = None
 try:
     import matplotlib
     matplotlib.use('TkAgg')
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-except Exception:
+except Exception as e:
+    MPL_IMPORT_ERROR = str(e)
     Figure = None
-FigureCanvasTkAgg = None
+    FigureCanvasTkAgg = None
 
 HARD_MAX_OUTPUT_RPM = 2000
 
@@ -90,6 +92,70 @@ def find_latest_run_dir(base: Path, sample_name: str) -> Path:
     candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
     return candidates[0]
 
+def _solve_3x3(a: list[list[float]], b: list[float]) -> list[float]:
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    n = 3
+    for col in range(n):
+        pivot = col
+        for r in range(col + 1, n):
+            if abs(m[r][col]) > abs(m[pivot][col]):
+                pivot = r
+        if abs(m[pivot][col]) < 1e-18:
+            raise ValueError("Singular matrix in sinus fit")
+        if pivot != col:
+            m[col], m[pivot] = m[pivot], m[col]
+        pv = m[col][col]
+        for c in range(col, n + 1):
+            m[col][c] /= pv
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col]
+            if factor == 0:
+                continue
+            for c in range(col, n + 1):
+                m[r][c] -= factor * m[col][c]
+    return [m[i][n] for i in range(n)]
+
+
+def _fit_sinus_amplitude(times: list[float], values: list[float], freq_hz: float) -> float:
+    if freq_hz <= 0:
+        raise ValueError("Frequency must be positive")
+    if len(times) != len(values) or not times:
+        raise ValueError("Time/value length mismatch or empty")
+
+    w = 2.0 * math.pi * float(freq_hz)
+    s1 = float(len(times))
+    s_sin = 0.0
+    s_cos = 0.0
+    s_sin2 = 0.0
+    s_cos2 = 0.0
+    s_sin_cos = 0.0
+    s_y = 0.0
+    s_y_sin = 0.0
+    s_y_cos = 0.0
+
+    for t, y in zip(times, values):
+        si = math.sin(w * t)
+        co = math.cos(w * t)
+        s_sin += si
+        s_cos += co
+        s_sin2 += si * si
+        s_cos2 += co * co
+        s_sin_cos += si * co
+        s_y += y
+        s_y_sin += y * si
+        s_y_cos += y * co
+
+    a_mat = [
+        [s1, s_sin, s_cos],
+        [s_sin, s_sin2, s_sin_cos],
+        [s_cos, s_sin_cos, s_cos2],
+    ]
+    b_vec = [s_y, s_y_sin, s_y_cos]
+    a0, b1, b2 = _solve_3x3(a_mat, b_vec)
+    return math.hypot(b1, b2)
+
 
 # -----------------------------
 # UI
@@ -122,7 +188,7 @@ class App(tk.Tk):
         self.lbl_status.configure(style=style_map.get(kind, "Status.Idle.TLabel"))
 
     def _pitaya_target(self) -> tuple[str, int, float]:
-        host = "rp-f06549.local"
+        host = "169.254.93.42"
         port = 5000
         timeout = 3.0
         try:
@@ -310,9 +376,9 @@ class App(tk.Tk):
                 ax.legend(loc="best")
             fig.savefig(run_dir / name)
 
-        save_plot("CombinedData_VoltageGraph.png", "voltage_abs_mean", "Average |voltage| [V]", True)
+        save_plot("CombinedData_VoltageGraph.png", "voltage_amp", "Voltage peak-to-peak [V]", True)
         save_plot("CombinedData_PowerGraph.png", "power_mean", "Average power [W]", True)
-        save_plot("CombinedData_PressureGraph.png", "pressure_amp", "Pressure amplitude [Bar]", False)
+        save_plot("CombinedData_PressureGraph.png", "pressure_amp", "Pressure peak-to-peak [Bar]", False)
 
     def _run_treatment_for_dir(self, run_dir: Path) -> Path:
         import csv
@@ -352,8 +418,11 @@ class App(tk.Tk):
             if not times:
                 continue
 
-            pressure_amp = max(pressures) - min(pressures)
-            voltage_abs_mean = fmean(abs(v) for v in voltages)
+            try:
+                pressure_amp = 2.0 * _fit_sinus_amplitude(times, pressures, freq_hz)
+            except Exception:
+                pressure_amp = (max(pressures) - min(pressures))
+            voltage_amp = (max(voltages) - min(voltages)) if voltages else 0.0
             power_mean = fmean(powers) if powers else 0.0
 
             rows.append({
@@ -362,7 +431,7 @@ class App(tk.Tk):
                 "rep": rep,
                 "n_samples": float(len(times)),
                 "pressure_amp": float(pressure_amp),
-                "voltage_abs_mean": float(voltage_abs_mean),
+                "voltage_amp": float(voltage_amp),
                 "power_mean": float(power_mean),
             })
 
@@ -373,7 +442,7 @@ class App(tk.Tk):
         summary = run_dir / "summary_table.csv"
         with summary.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["freq_hz", "r_ohm", "rep", "n_samples", "pressure_amp", "voltage_abs_mean", "power_mean"])
+            writer.writerow(["freq_hz", "r_ohm", "rep", "n_samples", "pressure_amp", "voltage_amp", "power_mean"])
             for r in rows:
                 writer.writerow([
                     f"{r['freq_hz']:.12g}",
@@ -381,7 +450,7 @@ class App(tk.Tk):
                     int(r["rep"]),
                     int(r["n_samples"]),
                     f"{r['pressure_amp']:.12g}",
-                    f"{r['voltage_abs_mean']:.12g}",
+                    f"{r['voltage_amp']:.12g}",
                     f"{r['power_mean']:.12g}",
                 ])
 
@@ -800,7 +869,7 @@ class App(tk.Tk):
 
         # Plan knobs
         self.v_signal_mult = tk.StringVar(value="1.0")
-        self.v_pitaya_host = tk.StringVar(value="rp-f06549.local")
+        self.v_pitaya_host = tk.StringVar(value="169.254.93.42")
         self.v_pitaya_port = tk.StringVar(value="5000")
 
         # EPOS plan fields (generator)
@@ -1025,7 +1094,10 @@ class App(tk.Tk):
             self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.tab_live)
             self.live_canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            ttk.Label(self.tab_live, text="Matplotlib not available. Install matplotlib to enable live plots.").pack(anchor="w")
+            msg = "Matplotlib not available. Install matplotlib to enable live plots."
+            if MPL_IMPORT_ERROR:
+                msg += f" Import error: {MPL_IMPORT_ERROR}"
+            ttk.Label(self.tab_live, text=msg).pack(anchor="w")
 
         # Analysis area is a dedicated tab for table + plots
         analysis_wrap = ttk.Frame(self.tab_analysis_main, padding=10)

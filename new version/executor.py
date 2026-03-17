@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import signal
 import time
 from dataclasses import dataclass
@@ -23,21 +24,27 @@ HARD_MAX_OUTPUT_RPM = 2000
 # -----------------------------
 
 def parse_waveform_text(resp: str) -> List[float]:
-    s = resp.strip()
+    s = (resp or "").strip()
     if s.startswith("{") and s.endswith("}"):
         s = s[1:-1].strip()
+    if not s:
+        return []
 
-    parts = s.split(",") if "," in s else s.split()
+    # Robust against malformed separators from SCPI payloads (e.g. "-0.01-0.02").
+    num_re = re.compile(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[+-]?(?:inf|nan)",
+        re.IGNORECASE,
+    )
+    matches = num_re.findall(s)
+    if not matches:
+        return []
+
     out: List[float] = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
+    for m in matches:
         try:
-            out.append(float(p))
+            out.append(float(m))
         except ValueError:
-            q = "".join(ch for ch in p if ch in "+-0123456789.eEinfNaIN")
-            out.append(float(q))
+            continue
     return out
 
 
@@ -75,6 +82,8 @@ def normalize_pitaya_setup(commands: Optional[List[str]]) -> List[str]:
             "ACQ:DATA:UNITS VOLTS",
             "ACQ:SOUR1:GAIN HV",
             "ACQ:SOUR2:GAIN HV",
+            "ACQ:START",
+            "ACQ:TRIG NOW",
         ]
 
     cmds = [c.strip() for c in commands if c and c.strip()]
@@ -90,6 +99,10 @@ def normalize_pitaya_setup(commands: Optional[List[str]]) -> List[str]:
         cmds.insert(2, "ACQ:SOUR1:GAIN HV")
     if not _has("ACQ:SOUR2:GAIN"):
         cmds.insert(3, "ACQ:SOUR2:GAIN HV")
+    if not _has("ACQ:START"):
+        cmds.append("ACQ:START")
+    if not any(c.startswith("ACQ:TRIG") for c in upper):
+        cmds.append("ACQ:TRIG NOW")
 
     return cmds
 
@@ -117,6 +130,32 @@ def save_csv_point(
         n = min(len(t), len(pressure), len(voltage), len(power))
         for i in range(n):
             w.writerow([t[i], pressure[i], voltage[i], power[i]])
+
+
+def append_summary_row(
+    summary_csv: Path,
+    *,
+    index: int,
+    rep_index: int,
+    freq_hz: float,
+    r_ohm: float,
+    pressure_amp: float,
+    voltage_amp: float,
+) -> None:
+    summary_csv.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not summary_csv.exists()
+    with summary_csv.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow([
+                "index",
+                "rep",
+                "freq_hz",
+                "r_ohm",
+                "pressure_amp",
+                "voltage_amp",
+            ])
+        w.writerow([index, rep_index, freq_hz, r_ohm, pressure_amp, voltage_amp])
 
 
 def format_legacy_num(v: float) -> str:
@@ -195,6 +234,7 @@ def execute_point(
     rep_index: int = 0,
     use_pitaya: bool = True,
     pressure_scale: float = 0.5,
+    voltage_scale: float = 1.0,
     osc_r_ohm: float = 1e6,
     freq_hz_override: Optional[float] = None,
 ) -> ExecResult:
@@ -202,8 +242,8 @@ def execute_point(
     idx = int(point["index"])
     dec = int(point["decimation"])
     out_csv = csv_dir / legacy_csv_name(point=point, rep_index=rep_index, freq_hz_override=freq_hz_override)
-    setup_cmds = normalize_pitaya_setup(point.get("pitaya_setup"))
-    queries = normalize_pitaya_queries(point.get("pitaya_queries"))
+    setup_cmds = point.get("pitaya_setup")
+    queries = point.get("pitaya_queries")
 
     print(f"\n--- Executing point {idx} ---")
     print(f"Decimation = {dec}")
@@ -231,21 +271,44 @@ def execute_point(
         pitaya.run_commands(setup_cmds)
 
         meas_time = (dec / fs_hz) * n_samples + float(extra_wait_s)
+        wait_for_pitaya_trigger(pitaya, timeout_s=min(2.0, max(0.5, meas_time)))
         if not no_sleep:
             print(f"Waiting {meas_time:.3f} seconds for acquisition...")
             time.sleep(meas_time)
 
         print("Reading channel 1 from Red Pitaya...")
-        ch1_txt = pitaya.query(queries[0])
+        ch1 = _query_waveform_with_retry(pitaya, queries[0], "ch1")
 
         print("Reading channel 2 from Red Pitaya...")
-        ch2_txt = pitaya.query(queries[1])
+        ch2 = _query_waveform_with_retry(pitaya, queries[1], "ch2")
 
-        ch1 = parse_waveform_text(ch1_txt)
-        ch2 = parse_waveform_text(ch2_txt)
+        if not ch1 or not ch2:
+            # Re-arm acquisition and retry once for both channels.
+            print("[Pitaya] empty channel data; re-arming acquisition and retrying...")
+            pitaya.run_commands(["ACQ:STOP", "ACQ:RST"])
+            pitaya.run_commands(setup_cmds)
+            wait_for_pitaya_trigger(pitaya, timeout_s=min(2.0, max(0.5, meas_time)))
+            if not no_sleep:
+                time.sleep(max(0.05, min(0.5, meas_time)))
+
+            print("Reading channel 1 from Red Pitaya (after re-arm)...")
+            ch1 = _query_waveform_with_retry(pitaya, queries[0], "ch1")
+            print("Reading channel 2 from Red Pitaya (after re-arm)...")
+            ch2 = _query_waveform_with_retry(pitaya, queries[1], "ch2")
+
+        if not ch1 or not ch2:
+            raise RuntimeError(
+                "No numeric waveform samples parsed "
+                f"(ch1={len(ch1)}, ch2={len(ch2)}). "
+                "Check SCPI response integrity and trigger/acquisition timing."
+            )
 
         print(f"Channel 1 samples: {len(ch1)}")
         print(f"Channel 2 samples: {len(ch2)}")
+        if ch1:
+            print(f"Channel 1 min/max: {min(ch1):.6g} / {max(ch1):.6g}")
+        if ch2:
+            print(f"Channel 2 min/max: {min(ch2):.6g} / {max(ch2):.6g}")
 
         # Legacy C# mapping:
         # pressure = 0.5 * CH1
@@ -264,12 +327,27 @@ def execute_point(
             total_r = max(z_osc, 1e-12)
 
         pressure = [float(pressure_scale) * p for p in ch1]
-        voltage = [float(v) for v in ch2]
+        voltage = [float(voltage_scale) * v for v in ch2]
         power = [(v * v) / total_r for v in voltage]
 
         t = make_time_axis(n_samples=len(ch1), fs_hz=fs_hz, decimation=dec)
         print(f"Saving CSV to {out_csv}")
         save_csv_point(out_csv, t=t, pressure=pressure, voltage=voltage, power=power)
+        if pressure and voltage:
+            p_min, p_max = min(pressure), max(pressure)
+            v_min, v_max = min(voltage), max(voltage)
+            p_amp = (p_max - p_min)
+            v_amp = (v_max - v_min)
+            summary_csv = csv_dir / "summary.csv"
+            append_summary_row(
+                summary_csv,
+                index=idx,
+                rep_index=rep_index,
+                freq_hz=freq_hz,
+                r_ohm=load_r,
+                pressure_amp=p_amp,
+                voltage_amp=v_amp,
+            )
 
         return ExecResult(index=idx, ok=True, error=None,
                           out_csv=str(out_csv),
@@ -291,6 +369,45 @@ def _is_pitaya_transient_error(msg: str) -> bool:
         or "timed out" in m
         or "timeout" in m
     )
+
+
+def wait_for_pitaya_trigger(pitaya: PitayaSCPI, timeout_s: float = 1.5, poll_s: float = 0.05) -> bool:
+    deadline = time.perf_counter() + max(0.05, float(timeout_s))
+    last: Optional[str] = None
+    while time.perf_counter() < deadline:
+        try:
+            resp = pitaya.query("ACQ:TRIG:STAT?")
+        except Exception as e:
+            print(f"[Pitaya] trigger status query failed: {e}")
+            return False
+        last = (resp or "").strip()
+        if "TD" in last:
+            return True
+        time.sleep(max(0.01, float(poll_s)))
+    if last is not None:
+        print(f"[Pitaya] trigger not ready after {timeout_s:.2f}s (last status={last!r}); continuing.")
+    return False
+
+def _query_waveform_with_retry(
+    pitaya: PitayaSCPI,
+    query: str,
+    label: str,
+    retry_sleep_s: float = 0.15,
+    retries: int = 1,
+) -> List[float]:
+    txt = pitaya.query(query)
+    data = parse_waveform_text(txt)
+    if data:
+        return data
+
+    for _ in range(max(0, int(retries))):
+        time.sleep(max(0.01, float(retry_sleep_s)))
+        txt = pitaya.query(query)
+        data = parse_waveform_text(txt)
+        if data:
+            return data
+
+    return []
 
 # -----------------------------
 # CLI
@@ -319,6 +436,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-lib", default="/home/tomas/thesis/epos/EPOS-Linux-Library-En/EPOS_Linux_Library/lib/intel/x86_64/libEposCmd.so.6.8.1.0")
     
     ap.add_argument("--no-pitaya", action="store_true", help="Force-disable Pitaya acquisition (EPOS-only run)")
+    ap.add_argument("--pitaya-diag", action="store_true", help="Query basic Pitaya status and exit")
 
     # Manual EPOS jog test (does not run the plan loop)
     ap.add_argument("--epos-jog", action="store_true", help="Run a manual EPOS jog test then exit")
@@ -345,11 +463,12 @@ def main() -> None:
     use_epos = bool(args.use_epos) and use_epos_cfg
 
     # Pitaya parameters (safe defaults)
-    host = args.pitaya_host or pitaya_cfg.get("host", "rp-f06549.local")
+    host = args.pitaya_host or pitaya_cfg.get("host", "169.254.93.42")
     port = int(args.pitaya_port) if args.pitaya_port is not None else int(pitaya_cfg.get("port", 5000))
     fs_hz = float(pitaya_cfg.get("fs_hz", 125e6))
     n_samples = int(pitaya_cfg.get("n_samples", 16384))
     pressure_scale = float(cfg.get("pressure_scale", 0.5))
+    voltage_scale = float(cfg.get("voltage_scale", 1.0))
     osc_r_ohm = float(cfg.get("osc_r_ohm", 1e6))
 
     csv_dir = run_dir / args.csv_dirname
@@ -412,8 +531,22 @@ def main() -> None:
         if use_pitaya and (not args.dry_run):
             pitaya = PitayaSCPI(host, port=port, timeout=args.timeout)
             pitaya.open()
+            idn = pitaya.query("*IDN?").strip()
+            if not idn:
+                raise RuntimeError(f"Pitaya handshake failed on {host}:{port}: empty *IDN? response")
+            print(f"[Pitaya] connected {host}:{port} *IDN? => {idn}")
         else:
             print("Pitaya is disabled or dry-run: not opening Red Pitaya.")
+
+        if args.pitaya_diag:
+            if pitaya is None:
+                raise RuntimeError("Pitaya not opened (is it enabled and not dry-run?)")
+            print("[Pitaya diag] ACQ:DEC? =>", pitaya.query("ACQ:DEC?").strip())
+            print("[Pitaya diag] ACQ:TRIG:STAT? =>", pitaya.query("ACQ:TRIG:STAT?").strip())
+            print("[Pitaya diag] ACQ:TRIG:DLY? =>", pitaya.query("ACQ:TRIG:DLY?").strip())
+            print("[Pitaya diag] ACQ:SOUR1:GAIN? =>", pitaya.query("ACQ:SOUR1:GAIN?").strip())
+            print("[Pitaya diag] ACQ:SOUR2:GAIN? =>", pitaya.query("ACQ:SOUR2:GAIN?").strip())
+            return
 
         # --- Open EPOS (prefer config JSON for lib_path)
         if use_epos and (not args.dry_run):
@@ -569,6 +702,7 @@ def main() -> None:
                     rep_index=rep,
                     use_pitaya=use_pitaya,
                     pressure_scale=pressure_scale,
+                    voltage_scale=voltage_scale,
                     osc_r_ohm=osc_r_ohm,
                     freq_hz_override=freq_hz_effective,
                 )
@@ -593,6 +727,7 @@ def main() -> None:
                                 rep_index=rep,
                                 use_pitaya=use_pitaya,
                                 pressure_scale=pressure_scale,
+                                voltage_scale=voltage_scale,
                                 osc_r_ohm=osc_r_ohm,
                                 freq_hz_override=freq_hz_effective,
                             )

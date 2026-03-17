@@ -87,7 +87,7 @@ Generated content lives in `generated_configs/`:
 - `generated_configs/<timestamp>/<sample_name>/run_manifest.json`
 
 ## Hardware / Network Setup
-- Red Pitaya SCPI over TCP (default host `rp-f06549.local`, port `5000`).
+- Red Pitaya SCPI over TCP (default host `169.254.93.42`, port `5000`).
 - EPOS library path defaults to: `/home/tomas/thesis/epos/EPOS-Linux-Library-En/EPOS_Linux_Library/lib/intel/x86_64/libEposCmd.so.6.8.1.0`
 - You can override Pitaya host/port via `executor.py` CLI flags or by editing the generated config.
 

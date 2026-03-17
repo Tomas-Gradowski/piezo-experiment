@@ -157,6 +157,7 @@ class ExperimentConfig:
 
     # calibration / model params
     pressure_scale: float
+    voltage_scale: float
     osc_r_ohm: float
     max_decimation: int
     epos:  EposPlan
@@ -314,7 +315,7 @@ def parse_args() -> argparse.Namespace:
 
     # Pitaya params (defaults match your code)
     ap.add_argument("--pitaya-enabled", action="store_true") 
-    ap.add_argument("--pitaya-host", default="rp-f06549.local")
+    ap.add_argument("--pitaya-host", default="169.254.93.42")
     ap.add_argument("--pitaya-port", type=int, default=5000)
     ap.add_argument("--fs-hz", type=float, default=125e6)
     ap.add_argument("--n-samples", type=int, default=16384)
@@ -337,7 +338,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-rest-s", type=float, default=0.0)
     ap.add_argument("--epos-rpm-override", type=int, default=0, help="Output rpm. 0 => derive from freq_hz")
     # Analysis / calibration params
-    ap.add_argument("--pressure-scale", type=float, default=0.5, help="Pressure multiplier (your 0.5)")
+    ap.add_argument("--pressure-scale", type=float, default=100.0, help="Pressure multiplier (post-Pitaya)")
+    ap.add_argument("--voltage-scale", type=float, default=100.0, help="Voltage multiplier (post-Pitaya)")
     ap.add_argument("--osc-r-ohm", type=float, default=1e6, help="Oscilloscope/input equivalent R (used in R_total)")
     ap.add_argument("--max-decimation", type=int, default=2 ** 16)
 
@@ -416,6 +418,7 @@ def main() -> None:
         periods=args.periods,
 
         pressure_scale=args.pressure_scale,
+        voltage_scale=args.voltage_scale,
         osc_r_ohm=args.osc_r_ohm,
         max_decimation=args.max_decimation,
         epos=epos_plan,
