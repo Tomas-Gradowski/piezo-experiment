@@ -5,7 +5,6 @@ import argparse
 import csv
 import json
 import math
-import re
 import signal
 import time
 from dataclasses import dataclass
@@ -30,21 +29,15 @@ def parse_waveform_text(resp: str) -> List[float]:
     if not s:
         return []
 
-    # Robust against malformed separators from SCPI payloads (e.g. "-0.01-0.02").
-    num_re = re.compile(
-        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[+-]?(?:inf|nan)",
-        re.IGNORECASE,
-    )
-    matches = num_re.findall(s)
-    if not matches:
-        return []
-
     out: List[float] = []
-    for m in matches:
-        try:
-            out.append(float(m))
-        except ValueError:
+    for part in s.split(","):
+        token = part.strip()
+        if not token:
             continue
+        try:
+            out.append(float(token))
+        except ValueError:
+            raise ValueError(f"Malformed SCPI waveform token: {token!r}")
     return out
 
 
@@ -153,9 +146,13 @@ def append_summary_row(
                 "freq_hz",
                 "r_ohm",
                 "pressure_amp",
-                "voltage_amp",
+                "voltage_mean_abs",
             ])
         w.writerow([index, rep_index, freq_hz, r_ohm, pressure_amp, voltage_amp])
+
+
+def mean_abs(values: List[float]) -> float:
+    return (sum(abs(v) for v in values) / len(values)) if values else 0.0
 
 
 def format_legacy_num(v: float) -> str:
@@ -335,9 +332,8 @@ def execute_point(
         save_csv_point(out_csv, t=t, pressure=pressure, voltage=voltage, power=power)
         if pressure and voltage:
             p_min, p_max = min(pressure), max(pressure)
-            v_min, v_max = min(voltage), max(voltage)
             p_amp = (p_max - p_min)
-            v_amp = (v_max - v_min)
+            v_amp = mean_abs(voltage)
             summary_csv = csv_dir / "summary.csv"
             append_summary_row(
                 summary_csv,
@@ -395,17 +391,39 @@ def _query_waveform_with_retry(
     retry_sleep_s: float = 0.15,
     retries: int = 1,
 ) -> List[float]:
-    txt = pitaya.query(query)
-    data = parse_waveform_text(txt)
-    if data:
-        return data
+    def _sanitize_waveform_text(txt: str) -> str:
+        if not txt:
+            return ""
+        s = txt.strip()
+        # Some Pitaya responses can return trigger status instead of waveform data.
+        if s in {"TD", "WAIT", "NONE"}:
+            return ""
+        # If a braced payload exists, prefer that slice.
+        if "{" in s and "}" in s:
+            start = s.find("{")
+            end = s.find("}", start)
+            if start >= 0 and end > start:
+                return s[start:end + 1]
+        return s
 
-    for _ in range(max(0, int(retries))):
-        time.sleep(max(0.01, float(retry_sleep_s)))
+    attempts = 1 + max(0, int(retries))
+    for i in range(attempts):
         txt = pitaya.query(query)
-        data = parse_waveform_text(txt)
+        cleaned = _sanitize_waveform_text(txt)
+        if not cleaned:
+            if i + 1 < attempts:
+                time.sleep(max(0.01, float(retry_sleep_s)))
+                continue
+            return []
+        try:
+            data = parse_waveform_text(cleaned)
+        except ValueError:
+            # Malformed token (e.g., "TD") or partial payload: retry.
+            data = []
         if data:
             return data
+        if i + 1 < attempts:
+            time.sleep(max(0.01, float(retry_sleep_s)))
 
     return []
 
@@ -631,6 +649,9 @@ def main() -> None:
                 motor_current = None
                 freq_hz_effective: Optional[float] = None
                 output_hz = float(gp.get("output_hz", gp.get("motor_hz", 0.0)))
+                rpm_out = 0
+                d = None
+                motor_rpm = 0
                 if use_epos:
                     d_str = epos_direction
                     if epos_alternate and (rep % 2 == 1):
@@ -643,33 +664,44 @@ def main() -> None:
                     # Tie experiment frequency to effective output rpm (same convention as jog).
                     # 1 Hz => 60 rpm output.
                     freq_hz_effective = (float(rpm_out) / 60.0) if rpm_out > 0 else 0.0
-                    dur_s = periods / freq_hz_effective if freq_hz_effective > 0 else 0.0
 
                     if args.dry_run:
                         print(
                             f"[EPOS dry-run] point={gp['index']} rep={rep} dir={d_str} "
-                            f"rpm_out={rpm_out} freq_hz={freq_hz_effective:.6g} duration_s={dur_s:.3f}"
+                            f"rpm_out={rpm_out} freq_hz={freq_hz_effective:.6g}"
                         )
                     else:
                         assert epos is not None
                         d = Direction(d_str)
                         print(
                             f"[EPOS] point={gp['index']} rep={rep} dir={d.value} "
-                            f"rpm_out={rpm_out} freq_hz={freq_hz_effective:.6g} duration_s={dur_s:.3f}"
+                            f"rpm_out={rpm_out} freq_hz={freq_hz_effective:.6g}"
                         )
-                        motor_rpm = epos.move_for_time(
-                            duration_s=dur_s,
-                            rpm_output=rpm_out,
-                            direction=d,
-                            should_stop=lambda: stop_requested,
-                        )
+                        motor_rpm = epos.jog_start(rpm_output=rpm_out, direction=d)
                         eff_out_rpm = abs(motor_rpm) / max(1, int(epos.cfg.gear_reduction))
                         print(f"[EPOS] effective_motor_rpm={motor_rpm} effective_output_rpm={eff_out_rpm:.2f}")
+                        # Match legacy behavior: wait for target speed before acquisition (with timeout).
+                        target = max(0, int(abs(motor_rpm)))
+                        timeout_s = 3.0
+                        t0 = time.perf_counter()
+                        vel = epos.get_velocity_rpm()
+                        if vel is None:
+                            time.sleep(0.5)
+                        else:
+                            while (time.perf_counter() - t0) < timeout_s:
+                                vel = epos.get_velocity_rpm()
+                                if vel is None:
+                                    break
+                                if abs(vel) >= max(0, int(0.99 * target) - 5):
+                                    break
+                                time.sleep(0.02)
+                            if vel is None:
+                                time.sleep(0.5)
+                            elif abs(vel) < max(0, int(0.99 * target) - 5):
+                                print(f"[EPOS] velocity wait timeout: vel={vel} target={target}")
                         motor_current = epos.get_current_mA()
                         vel = epos.get_velocity_rpm()
                         print(f"[EPOS] current_mA={motor_current} vel_rpm={vel}")
-                        if epos_rest_s > 0:
-                            time.sleep(epos_rest_s)
 
                 # --- Metadata per repetition
                 meta = {
@@ -689,23 +721,30 @@ def main() -> None:
                 }
 
                 # --- Pitaya acquisition per repetition (or skip)
-                res = execute_point(
-                    pitaya=pitaya,
-                    point=gp,
-                    fs_hz=fs_hz,
-                    n_samples=n_samples,
-                    csv_dir=csv_dir,
-                    no_sleep=args.no_sleep,
-                    extra_wait_s=args.extra_wait,
-                    dry_run=args.dry_run,
-                    meta=meta,
-                    rep_index=rep,
-                    use_pitaya=use_pitaya,
-                    pressure_scale=pressure_scale,
-                    voltage_scale=voltage_scale,
-                    osc_r_ohm=osc_r_ohm,
-                    freq_hz_override=freq_hz_effective,
-                )
+                try:
+                    res = execute_point(
+                        pitaya=pitaya,
+                        point=gp,
+                        fs_hz=fs_hz,
+                        n_samples=n_samples,
+                        csv_dir=csv_dir,
+                        no_sleep=args.no_sleep,
+                        extra_wait_s=args.extra_wait,
+                        dry_run=args.dry_run,
+                        meta=meta,
+                        rep_index=rep,
+                        use_pitaya=use_pitaya,
+                        pressure_scale=pressure_scale,
+                        voltage_scale=voltage_scale,
+                        osc_r_ohm=osc_r_ohm,
+                        freq_hz_override=freq_hz_effective,
+                    )
+                finally:
+                    if use_epos and (not args.dry_run) and (d is not None):
+                        assert epos is not None
+                        epos.jog_stop()
+                        if epos_rest_s > 0:
+                            time.sleep(epos_rest_s)
                 if (not res.ok) and use_pitaya and (not args.dry_run) and res.error:
                     if _is_pitaya_transient_error(res.error):
                         print(f"[Pitaya] transient error, attempting reconnect: {res.error}")
@@ -714,23 +753,36 @@ def main() -> None:
                                 pitaya.close()
                             pitaya = PitayaSCPI(host, port=port, timeout=args.timeout)
                             pitaya.open()
-                            res = execute_point(
-                                pitaya=pitaya,
-                                point=gp,
-                                fs_hz=fs_hz,
-                                n_samples=n_samples,
-                                csv_dir=csv_dir,
-                                no_sleep=args.no_sleep,
-                                extra_wait_s=args.extra_wait,
-                                dry_run=args.dry_run,
-                                meta=meta,
-                                rep_index=rep,
-                                use_pitaya=use_pitaya,
-                                pressure_scale=pressure_scale,
-                                voltage_scale=voltage_scale,
-                                osc_r_ohm=osc_r_ohm,
-                                freq_hz_override=freq_hz_effective,
-                            )
+                            if use_epos and (not args.dry_run) and (d is not None):
+                                assert epos is not None
+                                motor_rpm = epos.jog_start(rpm_output=rpm_out, direction=d)
+                                eff_out_rpm = abs(motor_rpm) / max(1, int(epos.cfg.gear_reduction))
+                                print(f"[EPOS] effective_motor_rpm={motor_rpm} effective_output_rpm={eff_out_rpm:.2f}")
+                                time.sleep(0.5)
+                            try:
+                                res = execute_point(
+                                    pitaya=pitaya,
+                                    point=gp,
+                                    fs_hz=fs_hz,
+                                    n_samples=n_samples,
+                                    csv_dir=csv_dir,
+                                    no_sleep=args.no_sleep,
+                                    extra_wait_s=args.extra_wait,
+                                    dry_run=args.dry_run,
+                                    meta=meta,
+                                    rep_index=rep,
+                                    use_pitaya=use_pitaya,
+                                    pressure_scale=pressure_scale,
+                                    voltage_scale=voltage_scale,
+                                    osc_r_ohm=osc_r_ohm,
+                                    freq_hz_override=freq_hz_effective,
+                                )
+                            finally:
+                                if use_epos and (not args.dry_run) and (d is not None):
+                                    assert epos is not None
+                                    epos.jog_stop()
+                                    if epos_rest_s > 0:
+                                        time.sleep(epos_rest_s)
                         except Exception as e:
                             print(f"[Pitaya] reconnect failed: {e}")
                 results.append(res)

@@ -59,6 +59,8 @@ class GenArgs:
     periods: float
     repetitions: int
 
+    pressure_scale: float
+
     pitaya_enabled: bool
     epos_enabled: bool
 
@@ -278,14 +280,18 @@ class App(tk.Tk):
             self.v_live_status.set("Waiting for first CSV…")
             return
 
-        # Parse latest CSV and plot (time_s vs channels)
+        # Parse latest CSV and plot (time vs pressure/voltage)
         try:
             import csv
+            from statistics import fmean
             times = []
-            y1 = []
-            y2 = []
+            pressures = []
+            voltages = []
             y1_label = "pressure"
             y2_label = "voltage"
+            time_idx = 0
+            pressure_idx = 1
+            voltage_idx = 2
             with self.last_csv.open("r", encoding="utf-8", errors="ignore", newline="") as f:
                 reader = csv.reader(f)
                 header = None
@@ -297,35 +303,61 @@ class App(tk.Tk):
                     # find header
                     if header is None:
                         header = [c.strip() for c in row]
-                        if len(header) >= 3:
+                        lower = [c.strip().lower() for c in row]
+                        if "time" in lower:
+                            time_idx = lower.index("time")
+                        if "pressure" in lower:
+                            pressure_idx = lower.index("pressure")
+                            y1_label = header[pressure_idx]
+                        elif len(header) >= 2:
                             y1_label = header[1]
+                        if "voltage" in lower:
+                            voltage_idx = lower.index("voltage")
+                            y2_label = header[voltage_idx]
+                        elif len(header) >= 3:
                             y2_label = header[2]
                         continue
                     # Expect at least 3 cols
                     if len(row) < 3:
                         continue
                     try:
-                        t = float(row[0])
-                        a = float(row[1])
-                        b = float(row[2])
+                        t = float(row[time_idx])
+                        a = float(row[pressure_idx])
+                        b = float(row[voltage_idx])
                     except Exception:
                         continue
                     times.append(t)
-                    y1.append(a)
-                    y2.append(b)
+                    pressures.append(a)
+                    voltages.append(b)
 
             self.v_live_status.set(f"Live: {self.last_csv.name}  ({len(times)} samples)")
-            if self.live_canvas is None or self.live_ax is None:
+            if self.live_canvas is None or self.live_ax_pressure is None or self.live_ax_voltage is None:
                 return
 
-            self.live_ax.clear()
+            self.live_ax_pressure.clear()
+            self.live_ax_voltage.clear()
             if times:
-                self.live_ax.plot(times, y1, label=y1_label)
-                self.live_ax.plot(times, y2, label=y2_label)
-                self.live_ax.set_xlabel("time (s)")
-                self.live_ax.set_ylabel("signal")
-                self.live_ax.grid(True, alpha=0.25)
-                self.live_ax.legend(loc="best")
+                t_s = times
+                y1_min, y1_max = (min(pressures), max(pressures)) if pressures else (0.0, 0.0)
+                y2_min, y2_max = (min(voltages), max(voltages)) if voltages else (0.0, 0.0)
+                y1_p2p = y1_max - y1_min
+                y2_p2p = y2_max - y2_min
+                y1_mean = fmean(pressures) if pressures else 0.0
+                y2_mean = fmean(voltages) if voltages else 0.0
+
+                y1_leg = f"{y1_label}  p2p={y1_p2p:.3g}  mean={y1_mean:.3g}"
+                y2_leg = f"{y2_label}  p2p={y2_p2p:.3g}  mean={y2_mean:.3g}"
+
+                self.live_ax_pressure.plot(t_s, pressures, label=y1_leg)
+                self.live_ax_pressure.set_ylabel(y1_label)
+                self.live_ax_pressure.grid(True, alpha=0.25)
+                self.live_ax_pressure.legend(loc="best")
+
+                self.live_ax_voltage.plot(t_s, voltages, label=y2_leg)
+                self.live_ax_voltage.set_xlabel("time (s)")
+                self.live_ax_voltage.set_ylabel(y2_label)
+                self.live_ax_voltage.grid(True, alpha=0.25)
+                self.live_ax_voltage.legend(loc="best")
             self.live_canvas.draw_idle()
 
         except Exception as e:
@@ -419,10 +451,10 @@ class App(tk.Tk):
                 continue
 
             try:
-                pressure_amp = 2.0 * _fit_sinus_amplitude(times, pressures, freq_hz)
+                pressure_amp = _fit_sinus_amplitude(times, pressures, freq_hz)
             except Exception:
                 pressure_amp = (max(pressures) - min(pressures))
-            voltage_amp = (max(voltages) - min(voltages)) if voltages else 0.0
+            voltage_amp = (sum(abs(v) for v in voltages) / len(voltages)) if voltages else 0.0
             power_mean = fmean(powers) if powers else 0.0
 
             rows.append({
@@ -866,6 +898,7 @@ class App(tk.Tk):
         self.v_run_subdir = tk.StringVar(value="auto")
         self.v_periods = tk.StringVar(value="10")
         self.v_repetitions = tk.StringVar(value="1")
+        self.v_pressure_scale = tk.StringVar(value="0.5")
 
         # Plan knobs
         self.v_signal_mult = tk.StringVar(value="1.0")
@@ -899,6 +932,7 @@ class App(tk.Tk):
 
         add_labeled(r, "Periods (capture)", self.v_periods); r += 1
         add_labeled(r, "Repetitions", self.v_repetitions); r += 1
+        add_labeled(r, "Pressure scale", self.v_pressure_scale); r += 1
 
         add_labeled(r, "Run subdir", self.v_run_subdir); r += 1
 
@@ -1087,10 +1121,12 @@ class App(tk.Tk):
 
         self.live_canvas = None
         self.live_fig = None
-        self.live_ax = None
+        self.live_ax_pressure = None
+        self.live_ax_voltage = None
         if FigureCanvasTkAgg is not None:
             self.live_fig = Figure(figsize=(6, 4), dpi=100)
-            self.live_ax = self.live_fig.add_subplot(111)
+            self.live_ax_pressure = self.live_fig.add_subplot(211)
+            self.live_ax_voltage = self.live_fig.add_subplot(212, sharex=self.live_ax_pressure)
             self.live_canvas = FigureCanvasTkAgg(self.live_fig, master=self.tab_live)
             self.live_canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
@@ -1492,6 +1528,8 @@ class App(tk.Tk):
                 periods=self._parse_float(self.v_periods.get(), "Periods", 0.01),
                 repetitions=self._parse_int(self.v_repetitions.get(), "Repetitions", 1, 1_000),
 
+                pressure_scale=self._parse_float(self.v_pressure_scale.get(), "Pressure scale", 0.0),
+
                 pitaya_enabled=pitaya_enabled,
                 epos_enabled=epos_enabled,
 
@@ -1550,6 +1588,7 @@ class App(tk.Tk):
                     "--run-subdir", ga.run_subdir,
                     "--periods", str(ga.periods),
                     "--repetitions", str(ga.repetitions),
+                    "--pressure-scale", str(ga.pressure_scale),
 
                     "--signal_hz_multiplier", str(ga.signal_hz_multiplier),
                 ]

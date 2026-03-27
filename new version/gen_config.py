@@ -49,9 +49,15 @@ def generate_array(min_v: float, max_v: float, n: int, scale: Scale) -> List[flo
     if n == 1:
         return [float(min_v)]
 
+    def _legacy_round(v: float) -> float:
+        if v == 0:
+            return 0.0
+        order = int(math.log10(abs(v)) + 1)
+        return round(round(v / (10 ** order), 3) * (10 ** order))
+
     if scale == "linear":
         delta = (max_v - min_v) / (n - 1)
-        return [(min_v + i * delta) for i in range(n)]
+        return [_legacy_round(min_v + i * delta) for i in range(n)]
 
     if scale == "log":
         if min_v <= 0 or max_v <= 0:
@@ -60,7 +66,7 @@ def generate_array(min_v: float, max_v: float, n: int, scale: Scale) -> List[flo
         vals = [float(min_v)]
         for _ in range(1, n):
             vals.append(vals[-1] * ratio)
-        return vals
+        return [_legacy_round(v) for v in vals]
 
     raise ValueError(f"Unknown scale: {scale}")
 
@@ -338,8 +344,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-rest-s", type=float, default=0.0)
     ap.add_argument("--epos-rpm-override", type=int, default=0, help="Output rpm. 0 => derive from freq_hz")
     # Analysis / calibration params
-    ap.add_argument("--pressure-scale", type=float, default=100.0, help="Pressure multiplier (post-Pitaya)")
-    ap.add_argument("--voltage-scale", type=float, default=100.0, help="Voltage multiplier (post-Pitaya)")
+    ap.add_argument("--pressure-scale", type=float, default=0.5, help="Pressure multiplier (post-Pitaya)")
+    ap.add_argument("--voltage-scale", type=float, default=1, help="Voltage multiplier (post-Pitaya)")
     ap.add_argument("--osc-r-ohm", type=float, default=1e6, help="Oscilloscope/input equivalent R (used in R_total)")
     ap.add_argument("--max-decimation", type=int, default=2 ** 16)
 

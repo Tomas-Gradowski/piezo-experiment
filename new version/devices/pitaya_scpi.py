@@ -112,6 +112,7 @@ class scpi:
             try:
                 sock = self._require_socket()
                 data = bytearray()
+                saw_braced_payload = False
                 while True:
                     chunk = sock.recv(4096)
                     if not chunk:
@@ -119,14 +120,32 @@ class scpi:
                     data.extend(chunk)
 
                     # Red Pitaya typically returns either "{...}" or line-terminated text.
-                    if b"}" in chunk or chunk.endswith(b"\n"):
+                    if b"}" in data:
+                        if b"{" in data:
+                            start = data.index(b"{")
+                            end = data.index(b"}", start)
+                            if end != -1:
+                                saw_braced_payload = True
+                                data = data[start:end + 1]
+                                break
+                        else:
+                            # We saw a closing brace before any opening brace.
+                            # Discard up to the last '}' and keep reading to resync.
+                            cut = data.rfind(b"}")
+                            if cut != -1:
+                                data = data[cut + 1:]
+                            continue
+                    if chunk.endswith(b"\n") and not (b"{" in data and b"}" not in data):
                         break
 
                     # Safety cap against misbehaving endpoint.
                     if len(data) > 50_000_000:
                         raise RuntimeError("SCPI response too large (possible read hang)")
 
-                return data.decode("utf-8", errors="replace").strip()
+                text = data.decode("utf-8", errors="replace").strip()
+                if saw_braced_payload and ("{" not in text or "}" not in text):
+                    raise RuntimeError("Incomplete braced SCPI payload")
+                return text
             except OSError:
                 self.close()
                 if attempt == 0:
