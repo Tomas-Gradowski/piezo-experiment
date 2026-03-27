@@ -276,6 +276,27 @@ class App(tk.Tk):
 
     def _update_live_plot(self) -> None:
         self._live_update_job = None
+        # Prefer newest CSV from run-dir/csv if available (more reliable than log parsing).
+        try:
+            if self.last_run_dir is not None:
+                csv_dir = self.last_run_dir / "csv"
+                if csv_dir.exists():
+                    latest = None
+                    latest_mtime = None
+                    for p in csv_dir.glob("*.csv"):
+                        try:
+                            mtime = p.stat().st_mtime
+                        except OSError:
+                            continue
+                        if latest is None or mtime > (latest_mtime or 0.0):
+                            latest = p
+                            latest_mtime = mtime
+                    if latest is not None:
+                        if self.last_csv is None or (self._last_csv_mtime is None) or (latest_mtime > self._last_csv_mtime):
+                            self.last_csv = latest
+                            self._last_csv_mtime = latest_mtime
+        except Exception:
+            pass
         if self.last_csv is None or not self.last_csv.exists():
             self.v_live_status.set("Waiting for first CSV…")
             return
@@ -848,6 +869,7 @@ class App(tk.Tk):
         self.last_csv: Path | None = None
         self.summary_csv: Path | None = None
         self._live_update_job: str | None = None
+        self._last_csv_mtime: float | None = None
 
         # ---- DR08 / RBox display state (parsed from executor stdout) ----
         self.v_rbox_target = tk.StringVar(value="—")
