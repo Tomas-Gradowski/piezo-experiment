@@ -155,6 +155,29 @@ def mean_abs(values: List[float]) -> float:
     return (sum(abs(v) for v in values) / len(values)) if values else 0.0
 
 
+def _effective_scales(cfg: Dict[str, Any]) -> tuple[float, float]:
+    v_scale = float(cfg.get("voltage_scale", 1.0))
+    probe_factor = 10.0 if bool(cfg.get("probe_10x", False)) else 1.0
+    return v_scale, probe_factor
+
+
+def _pressure_model_coeffs(cfg: Dict[str, Any]) -> Optional[tuple[float, float]]:
+    # Returns (a, b) for pressure_bar = a * V + b
+    if not all(k in cfg for k in ("pressure_v_min", "pressure_v_max", "pressure_p_min", "pressure_p_max")):
+        return None
+    v_min = float(cfg.get("pressure_v_min", 0.0))
+    v_max = float(cfg.get("pressure_v_max", 0.0))
+    p_min = float(cfg.get("pressure_p_min", 0.0))
+    p_max = float(cfg.get("pressure_p_max", 0.0))
+    if v_max == v_min:
+        return None
+    a = (p_max - p_min) / (v_max - v_min)
+    b = p_min - a * v_min
+    return a, b
+
+
+
+
 def format_legacy_num(v: float) -> str:
     return f"{float(v):g}"
 
@@ -230,8 +253,11 @@ def execute_point(
     meta: Optional[Dict[str, Any]] = None,
     rep_index: int = 0,
     use_pitaya: bool = True,
-    pressure_scale: float = 0.5,
-    voltage_scale: float = 1.0,
+    pressure_cal_a: float = 0.5,
+    pressure_cal_b: float = 0.0,
+    voltage_cal_a: float = 1.0,
+    voltage_cal_b: float = 0.0,
+    probe_factor: float = 1.0,
     osc_r_ohm: float = 1e6,
     freq_hz_override: Optional[float] = None,
 ) -> ExecResult:
@@ -323,8 +349,8 @@ def execute_point(
         else:
             total_r = max(z_osc, 1e-12)
 
-        pressure = [float(pressure_scale) * p for p in ch1]
-        voltage = [float(voltage_scale) * v for v in ch2]
+        pressure = [(float(pressure_cal_a) * (p * probe_factor)) + float(pressure_cal_b) for p in ch1]
+        voltage = [(float(voltage_cal_a) * (v * probe_factor)) + float(voltage_cal_b) for v in ch2]
         power = [(v * v) / total_r for v in voltage]
 
         t = make_time_axis(n_samples=len(ch1), fs_hz=fs_hz, decimation=dec)
@@ -485,9 +511,35 @@ def main() -> None:
     port = int(args.pitaya_port) if args.pitaya_port is not None else int(pitaya_cfg.get("port", 5000))
     fs_hz = float(pitaya_cfg.get("fs_hz", 125e6))
     n_samples = int(pitaya_cfg.get("n_samples", 16384))
-    pressure_scale = float(cfg.get("pressure_scale", 0.5))
     voltage_scale = float(cfg.get("voltage_scale", 1.0))
+    probe_10x = bool(cfg.get("probe_10x", False))
+    probe_factor = 10.0 if probe_10x else 1.0
     osc_r_ohm = float(cfg.get("osc_r_ohm", 1e6))
+
+    pressure_cal_a = 0.5
+    pressure_cal_b = 0.0
+    voltage_cal_a = voltage_scale
+    voltage_cal_b = 0.0
+
+    # Use explicit sensor model from config (e.g., 0-5V => 0-2.5 bar).
+    model = _pressure_model_coeffs(cfg)
+    if model is not None:
+        pressure_cal_a, pressure_cal_b = model
+    else:
+        # Fallback to Gems 3500 defaults if missing.
+        pressure_cal_a, pressure_cal_b = _pressure_model_coeffs({
+            "pressure_v_min": 0.0,
+            "pressure_v_max": 5.0,
+            "pressure_p_min": 0.0,
+            "pressure_p_max": 2.5,
+        }) or (0.5, 0.0)
+
+    print(
+        "[Calibration] using pressure model "
+        f"(v_min={cfg.get('pressure_v_min', 0.0)} v_max={cfg.get('pressure_v_max', 5.0)} "
+        f"p_min={cfg.get('pressure_p_min', 0.0)} p_max={cfg.get('pressure_p_max', 2.5)}) => "
+        f"pressure_fit=({pressure_cal_a:.6g}*V + {pressure_cal_b:.6g})"
+    )
 
     csv_dir = run_dir / args.csv_dirname
     csv_dir.mkdir(parents=True, exist_ok=True)
@@ -734,8 +786,11 @@ def main() -> None:
                         meta=meta,
                         rep_index=rep,
                         use_pitaya=use_pitaya,
-                        pressure_scale=pressure_scale,
-                        voltage_scale=voltage_scale,
+                        pressure_cal_a=pressure_cal_a,
+                        pressure_cal_b=pressure_cal_b,
+                        voltage_cal_a=voltage_cal_a,
+                        voltage_cal_b=voltage_cal_b,
+                        probe_factor=probe_factor,
                         osc_r_ohm=osc_r_ohm,
                         freq_hz_override=freq_hz_effective,
                     )
@@ -772,8 +827,11 @@ def main() -> None:
                                     meta=meta,
                                     rep_index=rep,
                                     use_pitaya=use_pitaya,
-                                    pressure_scale=pressure_scale,
-                                    voltage_scale=voltage_scale,
+                                    pressure_cal_a=pressure_cal_a,
+                                    pressure_cal_b=pressure_cal_b,
+                                    voltage_cal_a=voltage_cal_a,
+                                    voltage_cal_b=voltage_cal_b,
+                                    probe_factor=probe_factor,
                                     osc_r_ohm=osc_r_ohm,
                                     freq_hz_override=freq_hz_effective,
                                 )
@@ -820,6 +878,16 @@ def main() -> None:
         "pitaya": {"host": host, "port": port, "timeout": args.timeout},
         "n_samples": n_samples,
         "fs_hz": fs_hz,
+        "calibration": {
+            "pressure_cal_a": pressure_cal_a,
+            "pressure_cal_b": pressure_cal_b,
+            "voltage_cal_a": voltage_cal_a,
+            "voltage_cal_b": voltage_cal_b,
+            "pressure_v_min": float(cfg.get("pressure_v_min", 0.0)),
+            "pressure_v_max": float(cfg.get("pressure_v_max", 5.0)),
+            "pressure_p_min": float(cfg.get("pressure_p_min", 0.0)),
+            "pressure_p_max": float(cfg.get("pressure_p_max", 2.5)),
+        },
         "executed_points": len(results),
         "ok": sum(1 for r in results if r.ok),
         "fail": sum(1 for r in results if not r.ok),

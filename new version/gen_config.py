@@ -164,6 +164,11 @@ class ExperimentConfig:
     # calibration / model params
     pressure_scale: float
     voltage_scale: float
+    pressure_v_min: float
+    pressure_v_max: float
+    pressure_p_min: float
+    pressure_p_max: float
+    probe_10x: bool
     osc_r_ohm: float
     max_decimation: int
     epos:  EposPlan
@@ -346,6 +351,11 @@ def parse_args() -> argparse.Namespace:
     # Analysis / calibration params
     ap.add_argument("--pressure-scale", type=float, default=0.5, help="Pressure multiplier (post-Pitaya)")
     ap.add_argument("--voltage-scale", type=float, default=1, help="Voltage multiplier (post-Pitaya)")
+    ap.add_argument("--pressure-v-min", type=float, default=0.0, help="Pressure sensor Vmin")
+    ap.add_argument("--pressure-v-max", type=float, default=5.0, help="Pressure sensor Vmax")
+    ap.add_argument("--pressure-p-min", type=float, default=0.0, help="Pressure sensor Pmin (bar)")
+    ap.add_argument("--pressure-p-max", type=float, default=2.5, help="Pressure sensor Pmax (bar)")
+    ap.add_argument("--probe-10x", action="store_true", help="Apply 10x probe factor to voltage + pressure scales")
     ap.add_argument("--osc-r-ohm", type=float, default=1e6, help="Oscilloscope/input equivalent R (used in R_total)")
     ap.add_argument("--max-decimation", type=int, default=2 ** 16)
 
@@ -425,6 +435,11 @@ def main() -> None:
 
         pressure_scale=args.pressure_scale,
         voltage_scale=args.voltage_scale,
+        pressure_v_min=args.pressure_v_min,
+        pressure_v_max=args.pressure_v_max,
+        pressure_p_min=args.pressure_p_min,
+        pressure_p_max=args.pressure_p_max,
+        probe_10x=bool(args.probe_10x),
         osc_r_ohm=args.osc_r_ohm,
         max_decimation=args.max_decimation,
         epos=epos_plan,

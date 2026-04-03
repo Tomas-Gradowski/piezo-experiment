@@ -59,7 +59,11 @@ class GenArgs:
     periods: float
     repetitions: int
 
-    pressure_scale: float
+    probe_10x: bool
+    pressure_v_min: float
+    pressure_v_max: float
+    pressure_p_min: float
+    pressure_p_max: float
 
     pitaya_enabled: bool
     epos_enabled: bool
@@ -249,6 +253,8 @@ class App(tk.Tk):
             p = Path(m.group(1)).expanduser()
             if p.exists():
                 self.last_run_dir = p
+                # New run: refresh live CSV list.
+                self.after(0, self._refresh_live_csv_list)
                 # whenever run-dir updates, refresh plot list + attempt table reload
                 self.after(0, self._refresh_plots_list)
                 self.after(0, self._load_summary_table)
@@ -260,6 +266,7 @@ class App(tk.Tk):
             p = Path(m2.group(1).strip().strip("'\""))
             if p.exists():
                 self.last_csv = p
+                self.after(0, self._refresh_live_csv_list)
                 self.after(0, self._kick_live_update)
 
         # Data treatment might log where it wrote summary table
@@ -269,6 +276,27 @@ class App(tk.Tk):
             if p.exists():
                 self.summary_csv = p
                 self.after(0, self._load_summary_table)
+
+    def _maybe_capture_live_status(self, chunk: str) -> None:
+        # Point index
+        m = re.search(r"--- Executing point\s+(\d+)\s+---", chunk)
+        if m:
+            self.v_live_point.set(m.group(1))
+
+        # Frequency from EPOS log (freq_hz=...)
+        m = re.search(r"freq_hz=([0-9.+-eE]+)", chunk)
+        if m:
+            self.v_live_freq.set(m.group(1))
+
+        # Resistance from prompt
+        m = re.search(r"Set DR08 to R ≈\s*([0-9.+-eE]+)\s*Ω", chunk)
+        if m:
+            self.v_live_r.set(m.group(1))
+
+        # Rep index from log lines
+        m = re.search(r"rep=(\d+)", chunk)
+        if m:
+            self.v_live_rep.set(m.group(1))
 
     def _kick_live_update(self) -> None:
         if self._live_update_job is None:
@@ -297,7 +325,12 @@ class App(tk.Tk):
                             self._last_csv_mtime = latest_mtime
         except Exception:
             pass
-        if self.last_csv is None or not self.last_csv.exists():
+        # Keep list fresh if a new CSV appeared
+        if self.last_csv is not None and self.last_csv.exists():
+            self._refresh_live_csv_list()
+
+        active_csv = self._resolve_live_csv()
+        if active_csv is None or not active_csv.exists():
             self.v_live_status.set("Waiting for first CSV…")
             return
 
@@ -313,7 +346,7 @@ class App(tk.Tk):
             time_idx = 0
             pressure_idx = 1
             voltage_idx = 2
-            with self.last_csv.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+            with active_csv.open("r", encoding="utf-8", errors="ignore", newline="") as f:
                 reader = csv.reader(f)
                 header = None
                 for row in reader:
@@ -351,7 +384,7 @@ class App(tk.Tk):
                     pressures.append(a)
                     voltages.append(b)
 
-            self.v_live_status.set(f"Live: {self.last_csv.name}  ({len(times)} samples)")
+            self.v_live_status.set(f"Live: {active_csv.name}  ({len(times)} samples)")
             if self.live_canvas is None or self.live_ax_pressure is None or self.live_ax_voltage is None:
                 return
 
@@ -631,6 +664,42 @@ class App(tk.Tk):
         if not pngs:
             self.plot_preview.configure(image="", text="No .png plots found under run-dir.")
 
+    def _refresh_live_csv_list(self) -> None:
+        self._live_csv_files = []
+        if self.last_run_dir is None or not self.last_run_dir.exists():
+            return
+        csv_dir = self.last_run_dir / "csv"
+        if not csv_dir.exists():
+            return
+        csvs = [
+            p for p in csv_dir.glob("*.csv")
+            if p.name.startswith("SingleMeasurement_")
+        ]
+        csvs = sorted(csvs, key=lambda p: p.stat().st_mtime, reverse=True)
+        self._live_csv_files = csvs
+        values = ["<Latest>"] + [p.name for p in csvs]
+        if hasattr(self, "live_csv_combo"):
+            self.live_csv_combo.configure(values=values)
+        # Preserve selection if possible
+        current = self.v_live_csv.get()
+        if current not in values:
+            self.v_live_csv.set("<Latest>")
+
+    def _resolve_live_csv(self) -> Path | None:
+        choice = (self.v_live_csv.get() or "").strip()
+        if choice and choice != "<Latest>":
+            for p in self._live_csv_files:
+                if p.name == choice:
+                    return p
+            # Fallback to direct path if user pasted
+            cand = Path(choice)
+            if cand.exists():
+                return cand
+        # Latest
+        if self._live_csv_files:
+            return self._live_csv_files[0]
+        return self.last_csv if (self.last_csv and self.last_csv.exists()) else None
+
     def _show_selected_plot(self) -> None:
         sel = self.plots_list.curselection()
         if not sel:
@@ -870,12 +939,18 @@ class App(tk.Tk):
         self.summary_csv: Path | None = None
         self._live_update_job: str | None = None
         self._last_csv_mtime: float | None = None
+        self._live_csv_files: list[Path] = []
+        self.v_live_csv = tk.StringVar(value="<Latest>")
 
         # ---- DR08 / RBox display state (parsed from executor stdout) ----
         self.v_rbox_target = tk.StringVar(value="—")
         self.v_rbox_requested = tk.StringVar(value="—")
         self.v_rbox_digits = [tk.StringVar(value="—") for _ in range(8)]
         self._awaiting_rbox_digits = False
+        self.v_live_point = tk.StringVar(value="—")
+        self.v_live_freq = tk.StringVar(value="—")
+        self.v_live_r = tk.StringVar(value="—")
+        self.v_live_rep = tk.StringVar(value="—")
 
         # ---- Main layout tabs ----
         self.main_tabs = ttk.Notebook(self)
@@ -920,7 +995,11 @@ class App(tk.Tk):
         self.v_run_subdir = tk.StringVar(value="auto")
         self.v_periods = tk.StringVar(value="10")
         self.v_repetitions = tk.StringVar(value="1")
-        self.v_pressure_scale = tk.StringVar(value="0.5")
+        self.v_pressure_v_min = tk.StringVar(value="0.0")
+        self.v_pressure_v_max = tk.StringVar(value="5.0")
+        self.v_pressure_p_min = tk.StringVar(value="0.0")
+        self.v_pressure_p_max = tk.StringVar(value="2.5")
+        self.v_probe_10x = tk.BooleanVar(value=False)
 
         # Plan knobs
         self.v_signal_mult = tk.StringVar(value="1.0")
@@ -954,7 +1033,11 @@ class App(tk.Tk):
 
         add_labeled(r, "Periods (capture)", self.v_periods); r += 1
         add_labeled(r, "Repetitions", self.v_repetitions); r += 1
-        add_labeled(r, "Pressure scale", self.v_pressure_scale); r += 1
+        add_labeled(r, "Pressure V min", self.v_pressure_v_min); r += 1
+        add_labeled(r, "Pressure V max", self.v_pressure_v_max); r += 1
+        add_labeled(r, "Pressure P min (bar)", self.v_pressure_p_min); r += 1
+        add_labeled(r, "Pressure P max (bar)", self.v_pressure_p_max); r += 1
+        ttk.Checkbutton(frm, text="10x probe (multiply signals by 10)", variable=self.v_probe_10x).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         add_labeled(r, "Run subdir", self.v_run_subdir); r += 1
 
@@ -1140,6 +1223,41 @@ class App(tk.Tk):
 
         self.v_live_status = tk.StringVar(value="Waiting for first CSV…")
         ttk.Label(self.tab_live, textvariable=self.v_live_status).pack(anchor="w", pady=(0, 6))
+        live_top = ttk.Frame(self.tab_live)
+        live_top.pack(anchor="w", fill="x", pady=(0, 6))
+        ttk.Label(live_top, text="Measurement").pack(side="left")
+        self.live_csv_combo = ttk.Combobox(
+            live_top,
+            textvariable=self.v_live_csv,
+            values=["<Latest>"],
+            state="readonly",
+            width=48,
+        )
+        self.live_csv_combo.pack(side="left", padx=(6, 6))
+        self.live_csv_combo.bind("<<ComboboxSelected>>", lambda _e: self._kick_live_update())
+        ttk.Button(live_top, text="Refresh", command=self._refresh_live_csv_list).pack(side="left")
+
+        live_ctrl = ttk.Frame(self.tab_live)
+        live_ctrl.pack(anchor="w", fill="x", pady=(0, 8))
+        ttk.Label(live_ctrl, text="Status:").pack(side="left")
+        ttk.Label(live_ctrl, textvariable=self.v_status, style="Status.Idle.TLabel").pack(side="left", padx=6)
+        ttk.Label(live_ctrl, text="Point:").pack(side="left", padx=(12, 0))
+        ttk.Label(live_ctrl, textvariable=self.v_live_point).pack(side="left", padx=(2, 6))
+        ttk.Label(live_ctrl, text="Freq:").pack(side="left")
+        ttk.Label(live_ctrl, textvariable=self.v_live_freq).pack(side="left", padx=(2, 6))
+        ttk.Label(live_ctrl, text="R:").pack(side="left")
+        ttk.Label(live_ctrl, textvariable=self.v_live_r).pack(side="left", padx=(2, 6))
+        ttk.Label(live_ctrl, text="Rep:").pack(side="left")
+        ttk.Label(live_ctrl, textvariable=self.v_live_rep).pack(side="left", padx=(2, 6))
+
+        live_btns = ttk.Frame(self.tab_live)
+        live_btns.pack(anchor="w", fill="x", pady=(0, 6))
+        self.btn_continue_live = ttk.Button(live_btns, text="Continue (send Enter)", command=self.on_continue, state="disabled", style="Continue.TButton")
+        self.btn_continue_live.pack(side="left")
+        self.btn_stop_live = ttk.Button(live_btns, text="Stop", command=self.on_stop, state="disabled", style="Stop.TButton")
+        self.btn_stop_live.pack(side="left", padx=8)
+        self.pb_live = ttk.Progressbar(live_btns, variable=self.v_progress, style="Thin.Horizontal.TProgressbar")
+        self.pb_live.pack(side="left", fill="x", expand=True, padx=(12, 0))
 
         self.live_canvas = None
         self.live_fig = None
@@ -1262,6 +1380,7 @@ class App(tk.Tk):
                 # Existing handlers
                 self._advance_progress_from_log(s)
                 self._maybe_capture_paths(s)
+                self._maybe_capture_live_status(s)
 
                 # ---------------------------
                 # DR08 / RBox parsing
@@ -1324,6 +1443,8 @@ class App(tk.Tk):
 
         if interactive:
             self.btn_continue.configure(state="disabled")
+            if hasattr(self, "btn_continue_live"):
+                self.btn_continue_live.configure(state="disabled")
 
         for line in self.proc.stdout:
             if self.stop_flag.is_set():
@@ -1337,6 +1458,8 @@ class App(tk.Tk):
 
             if interactive and ("press Enter" in line or "then press Enter" in line):
                 self.btn_continue.configure(state="normal")
+                if hasattr(self, "btn_continue_live"):
+                    self.btn_continue_live.configure(state="normal")
                 self.log("[UI] Executor is waiting. Click 'Continue (send Enter)'.\n")
 
         try:
@@ -1349,6 +1472,8 @@ class App(tk.Tk):
                 rc = -1
         finally:
             self.btn_continue.configure(state="disabled")
+            if hasattr(self, "btn_continue_live"):
+                self.btn_continue_live.configure(state="disabled")
 
         return rc
 
@@ -1487,6 +1612,8 @@ class App(tk.Tk):
 
         self.btn_run.configure(state="disabled")
         self.btn_stop.configure(state="normal")
+        if hasattr(self, "btn_stop_live"):
+            self.btn_stop_live.configure(state="normal")
         self.stop_flag.clear()
 
         def work():
@@ -1513,6 +1640,8 @@ class App(tk.Tk):
                 self.stop_flag.clear()
                 self.btn_run.configure(state="normal")
                 self.btn_stop.configure(state="disabled")
+                if hasattr(self, "btn_stop_live"):
+                    self.btn_stop_live.configure(state="disabled")
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
@@ -1550,7 +1679,11 @@ class App(tk.Tk):
                 periods=self._parse_float(self.v_periods.get(), "Periods", 0.01),
                 repetitions=self._parse_int(self.v_repetitions.get(), "Repetitions", 1, 1_000),
 
-                pressure_scale=self._parse_float(self.v_pressure_scale.get(), "Pressure scale", 0.0),
+                probe_10x=bool(self.v_probe_10x.get()),
+                pressure_v_min=self._parse_float(self.v_pressure_v_min.get(), "Pressure V min", -1e6),
+                pressure_v_max=self._parse_float(self.v_pressure_v_max.get(), "Pressure V max", -1e6),
+                pressure_p_min=self._parse_float(self.v_pressure_p_min.get(), "Pressure P min", -1e6),
+                pressure_p_max=self._parse_float(self.v_pressure_p_max.get(), "Pressure P max", -1e6),
 
                 pitaya_enabled=pitaya_enabled,
                 epos_enabled=epos_enabled,
@@ -1610,10 +1743,15 @@ class App(tk.Tk):
                     "--run-subdir", ga.run_subdir,
                     "--periods", str(ga.periods),
                     "--repetitions", str(ga.repetitions),
-                    "--pressure-scale", str(ga.pressure_scale),
+                    "--pressure-v-min", str(ga.pressure_v_min),
+                    "--pressure-v-max", str(ga.pressure_v_max),
+                    "--pressure-p-min", str(ga.pressure_p_min),
+                    "--pressure-p-max", str(ga.pressure_p_max),
 
                     "--signal_hz_multiplier", str(ga.signal_hz_multiplier),
                 ]
+                if ga.probe_10x:
+                    gen_cmd.append("--probe-10x")
 
                 if ga.pitaya_enabled:
                     gen_cmd.append("--pitaya-enabled")
@@ -1730,6 +1868,10 @@ class App(tk.Tk):
                 self.btn_run.configure(state="normal")
                 self.btn_stop.configure(state="disabled")
                 self.btn_continue.configure(state="disabled")
+                if hasattr(self, "btn_stop_live"):
+                    self.btn_stop_live.configure(state="disabled")
+                if hasattr(self, "btn_continue_live"):
+                    self.btn_continue_live.configure(state="disabled")
                 if self.stop_flag.is_set():
                     self._set_status("STOPPED", "stop")
                 else:
