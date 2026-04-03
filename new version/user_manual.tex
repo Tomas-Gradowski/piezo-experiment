@@ -1,0 +1,155 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{parskip}
+
+\title{Piezo Experiment Software User Manual}
+\author{Piezo Experiment Team}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+This document explains the functionalities, main features, and usage of the Piezo Experiment software (Python/Tkinter UI). It also compares the current software to the legacy C\# implementation.
+
+The software provides an end-to-end workflow for planning measurements, running the experiment (motor + Red Pitaya acquisition), monitoring live data, and exporting analysis outputs.
+
+\section{System Requirements}
+\begin{itemize}[leftmargin=*]
+\item Operating system: Linux (current development) or Windows (packaged executable).
+\item Python 3.x with required libraries when running from source.
+\item Red Pitaya reachable over TCP/IP.
+\item EPOS motor controller (optional for motor control modes).
+\end{itemize}
+
+\section{Quick Start}
+\begin{enumerate}
+\item Launch the UI: \texttt{python3 ui6.py} (or double-click the Windows \texttt{piezo-experiment.exe}).
+\item Fill the experiment parameters in the \textbf{Run} tab (sample name, frequency and resistance ranges, repetitions, etc.).
+\item Select the test mode (Plan-only, Pitaya-only, EPOS-only, or Full experiment).
+\item Click \textbf{Run}. The software generates the plan, runs the measurement loop, and stores outputs under \texttt{generated\_configs/}.
+\item Use the \textbf{Live acquisition} tab to monitor the latest CSV and view pressure/voltage p2p in real time.
+\item Use the \textbf{Analysis} tab to load summary tables and export results.
+\end{enumerate}
+
+\section{User Interface Tour}
+\subsection{Run Tab}
+The Run tab defines the experiment parameters and starts the workflow.
+\begin{itemize}[leftmargin=*]
+\item Sample name and output folder parameters.
+\item Frequency sweep (min/max, points, scale).
+\item Resistance sweep (min/max, points, scale).
+\item Periods and repetitions.
+\item Pressure calibration (Vmin/Vmax, Pmin/Pmax).
+\item 10x probe toggle.
+\item Instrument input resistance (used for total resistance and power computation).
+\item Pitaya host/port.
+\item Mode selector: Plan-only, Pitaya-only, EPOS-only, Full experiment.
+\item Safety controls: RPM limit and number of points.
+\item DR08 prompt checkbox and digit display.
+\end{itemize}
+
+\subsection{Log Tab}
+The Log tab shows the command output from the generator and executor, including errors and progress messages.
+
+\subsection{Live Acquisition Tab}
+The Live Acquisition tab plots the latest measurement CSV. It displays:
+\begin{itemize}[leftmargin=*]
+\item Current point, frequency, resistance, and repetition.
+\item Live pressure and voltage traces.
+\item Live p2p and mean statistics computed directly from the CSV.
+\item Controls for stopping or continuing when prompted.
+\end{itemize}
+
+\subsection{Analysis Tab}
+The Analysis tab loads and displays the summary table and allows exporting it. It also shows plots generated during data treatment.
+
+\section{Workflow Details}
+\subsection{Plan Generation}
+The software generates an experiment plan using \texttt{gen\_config.py}, creating a run directory under \texttt{generated\_configs/}. It writes:
+\begin{itemize}[leftmargin=*]
+\item \texttt{experiment\_config.json}
+\item \texttt{measurement\_plan.json}
+\item \texttt{pitaya\_setup\_first\_point.txt}
+\end{itemize}
+
+\subsection{Execution}
+The executor reads the plan and runs the experiment:
+\begin{itemize}[leftmargin=*]
+\item EPOS motor control (optional).
+\item Red Pitaya acquisition (optional).
+\item DR08 prompts when resistance changes (optional).
+\item CSV output for each measurement under \texttt{run\_dir/csv/}.
+\item A manifest with metadata (\texttt{run\_manifest.json}).
+\end{itemize}
+
+\subsection{Data Treatment and Summary}
+The UI produces \texttt{summary\_table.csv} by reading each CSV and computing:
+\begin{itemize}[leftmargin=*]
+\item Pressure peak-to-peak.
+\item Voltage peak-to-peak.
+\item Mean power (from the CSV \texttt{power} column).
+\end{itemize}
+The plots \texttt{CombinedData\_PressureGraph.png}, \texttt{CombinedData\_VoltageGraph.png}, and \texttt{CombinedData\_PowerGraph.png} are generated for quick inspection.
+
+\section{Outputs and File Structure}
+Each run creates a directory like:
+\begin{verbatim}
+/generated_configs/YYYY_MM_DD_HHhMM/<sample_name>/
+  experiment_config.json
+  measurement_plan.json
+  pitaya_setup_first_point.txt
+  csv/
+    SingleMeasurement_<freq>Hz_<R>Ohms_<rep>.csv
+  summary_table.csv
+  CombinedData_*.png
+  run_manifest.json
+\end{verbatim}
+
+\section{Power Computation}
+Power is computed per sample as:
+\[ P = \frac{V^2}{R_{\text{total}}} \]
+where:
+\begin{itemize}[leftmargin=*]
+\item $V$ is the voltage after calibration and probe scaling.
+\item $R_{\text{total}}$ is the parallel combination of the load resistance and the instrument input resistance.
+\end{itemize}
+The instrument input resistance is configurable in the Run tab so users can update it when using a different multimeter or acquisition device.
+
+\section{Troubleshooting}
+\begin{itemize}[leftmargin=*]
+\item \textbf{No CSV files appear:} verify Pitaya connection and that the selected mode includes acquisition.
+\item \textbf{Live plot not updating:} ensure a CSV exists in the run directory and click Refresh.
+\item \textbf{Motor not moving:} ensure EPOS is enabled in the selected mode and hardware is connected.
+\item \textbf{Permission errors:} ensure the run directory is writable.
+\end{itemize}
+
+\section{Comparison with Legacy C\# Software}
+The legacy application (C\# \texttt{Form1}) was a monolithic Windows Forms implementation. Key differences:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Modularity:} the new software separates planning (\texttt{gen\_config.py}), execution (\texttt{executor.py}), and UI (\texttt{ui6.py}). The legacy code combined all responsibilities in a single form.
+\item \textbf{Parameter flexibility:} the current UI exposes more parameters directly (e.g., signal multiplier, pressure calibration, instrument input resistance). In the legacy code many constants were fixed (e.g., Pitaya hostname, input impedance assumptions).
+\item \textbf{Performance and robustness:} the new system isolates long-running acquisition in a worker thread and provides clear logging and retries; the legacy app ran the loop inside UI handlers and could become unresponsive.
+\item \textbf{File outputs:} the new system standardizes run directories and writes JSON configs, measurement plans, per-point CSVs, and summary tables. The legacy application wrote CSVs and plots but did not emit structured configuration files.
+\item \textbf{Safety controls:} explicit RPM caps and mode-specific safety checks are enforced in the new software.
+\item \textbf{Cross-platform:} the new system can be packaged for Windows as a standalone executable; the legacy was tied to C\#/.NET Windows Forms.
+\end{itemize}
+
+\section{Appendix: Build (Windows Executable)}
+To build a Windows executable from source, use PyInstaller on Windows:
+\begin{verbatim}
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install pyinstaller
+pyinstaller --onefile --noconsole --name piezo-experiment ui6.py
+\end{verbatim}
+
+\end{document}

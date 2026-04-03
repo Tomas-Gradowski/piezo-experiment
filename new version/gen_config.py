@@ -297,7 +297,7 @@ def build_plan(cfg: ExperimentConfig) -> Dict[str, Any]:
 # CLI
 # -----------------------------
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Generate experiment config + per-point Pitaya command plan (old UI parameters via CLI)."
     )
@@ -359,7 +359,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--osc-r-ohm", type=float, default=1e6, help="Oscilloscope/input equivalent R (used in R_total)")
     ap.add_argument("--max-decimation", type=int, default=2 ** 16)
 
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
 def make_output_path(base: str, run_subdir: str, sample_name: str) -> Path:
@@ -374,8 +374,8 @@ def make_output_path(base: str, run_subdir: str, sample_name: str) -> Path:
     return base_path / run_subdir / sample_name
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: List[str] | None = None) -> None:
+    args = parse_args(argv)
 
     base_dir = Path(args.out_dir).expanduser()
 

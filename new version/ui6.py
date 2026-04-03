@@ -33,7 +33,8 @@ HARD_MAX_OUTPUT_RPM = 2000
 # -----------------------------
 # Paths
 # -----------------------------
-REPO_ROOT = Path(__file__).resolve().parent
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+REPO_ROOT = Path(sys.executable).resolve().parent if IS_FROZEN else Path(__file__).resolve().parent
 GEN = REPO_ROOT / "gen_config.py"
 EXEC = REPO_ROOT / "executor.py"
 GENERATED = REPO_ROOT / "generated_configs"
@@ -64,6 +65,7 @@ class GenArgs:
     pressure_v_max: float
     pressure_p_min: float
     pressure_p_max: float
+    osc_r_ohm: float
 
     pitaya_enabled: bool
     epos_enabled: bool
@@ -470,6 +472,51 @@ class App(tk.Tk):
         import csv
         from statistics import fmean
 
+        def read_series(csv_path: Path) -> tuple[list[float], list[float], list[float], list[float]]:
+            times: list[float] = []
+            pressures: list[float] = []
+            voltages: list[float] = []
+            powers: list[float] = []
+
+            time_idx = 0
+            pressure_idx = 1
+            voltage_idx = 2
+            power_idx = None
+
+            with csv_path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+                reader = csv.reader(f)
+                header = None
+                for row in reader:
+                    if not row:
+                        continue
+                    if row[0].startswith("#"):
+                        continue
+                    if header is None:
+                        header = [c.strip() for c in row]
+                        lower = [c.strip().lower() for c in row]
+                        if "time" in lower:
+                            time_idx = lower.index("time")
+                        if "pressure" in lower:
+                            pressure_idx = lower.index("pressure")
+                        if "voltage" in lower:
+                            voltage_idx = lower.index("voltage")
+                        if "power" in lower:
+                            power_idx = lower.index("power")
+                        continue
+
+                    if len(row) < 3:
+                        continue
+                    try:
+                        times.append(float(row[time_idx]))
+                        pressures.append(float(row[pressure_idx]))
+                        voltages.append(float(row[voltage_idx]))
+                        if power_idx is not None and power_idx < len(row):
+                            powers.append(float(row[power_idx]))
+                    except Exception:
+                        continue
+
+            return times, pressures, voltages, powers
+
         csv_dir = run_dir / "csv"
         if not csv_dir.exists():
             raise RuntimeError(f"No csv directory found: {csv_dir}")
@@ -485,30 +532,12 @@ class App(tk.Tk):
                 continue
             freq_hz, r_ohm, rep = meta
 
-            times: list[float] = []
-            pressures: list[float] = []
-            voltages: list[float] = []
-            powers: list[float] = []
-
-            with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        times.append(float(row.get("time", "nan")))
-                        pressures.append(float(row.get("pressure", "nan")))
-                        voltages.append(float(row.get("voltage", "nan")))
-                        powers.append(float(row.get("power", "nan")))
-                    except Exception:
-                        continue
-
+            times, pressures, voltages, powers = read_series(p)
             if not times:
                 continue
 
-            try:
-                pressure_amp = _fit_sinus_amplitude(times, pressures, freq_hz)
-            except Exception:
-                pressure_amp = (max(pressures) - min(pressures))
-            voltage_amp = (sum(abs(v) for v in voltages) / len(voltages)) if voltages else 0.0
+            pressure_amp = (max(pressures) - min(pressures)) if pressures else 0.0
+            voltage_amp = (max(voltages) - min(voltages)) if voltages else 0.0
             power_mean = fmean(powers) if powers else 0.0
 
             rows.append({
@@ -999,6 +1028,7 @@ class App(tk.Tk):
         self.v_pressure_v_max = tk.StringVar(value="5.0")
         self.v_pressure_p_min = tk.StringVar(value="0.0")
         self.v_pressure_p_max = tk.StringVar(value="2.5")
+        self.v_osc_r_ohm = tk.StringVar(value="1000000")
         self.v_probe_10x = tk.BooleanVar(value=False)
 
         # Plan knobs
@@ -1037,6 +1067,7 @@ class App(tk.Tk):
         add_labeled(r, "Pressure V max", self.v_pressure_v_max); r += 1
         add_labeled(r, "Pressure P min (bar)", self.v_pressure_p_min); r += 1
         add_labeled(r, "Pressure P max (bar)", self.v_pressure_p_max); r += 1
+        add_labeled(r, "Instrument input R (ohm)", self.v_osc_r_ohm); r += 1
         ttk.Checkbutton(frm, text="10x probe (multiply signals by 10)", variable=self.v_probe_10x).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         add_labeled(r, "Run subdir", self.v_run_subdir); r += 1
@@ -1366,7 +1397,8 @@ class App(tk.Tk):
     # -----------------------------
     def _make_env(self) -> dict[str, str]:
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(REPO_ROOT)
+        if not IS_FROZEN:
+            env["PYTHONPATH"] = str(REPO_ROOT)
         return env
 
     def log(self, s: str) -> None:
@@ -1476,6 +1508,16 @@ class App(tk.Tk):
                 self.btn_continue_live.configure(state="disabled")
 
         return rc
+
+    def _build_gen_cmd(self, args: list[str]) -> list[str]:
+        if IS_FROZEN:
+            return [sys.executable, "--run-gen-config", *args]
+        return [sys.executable, str(GEN), *args]
+
+    def _build_exec_cmd(self, args: list[str]) -> list[str]:
+        if IS_FROZEN:
+            return [sys.executable, "--run-executor", *args]
+        return [sys.executable, str(EXEC), *args]
 
     def _parse_int(self, s: str, name: str, min_v: int | None = None, max_v: int | None = None) -> int:
         try:
@@ -1595,7 +1637,7 @@ class App(tk.Tk):
             messagebox.showwarning("Busy", "Already running.")
             return
 
-        if not EXEC.exists():
+        if (not IS_FROZEN) and (not EXEC.exists()):
             messagebox.showerror("Missing files", "executor.py not found in repo root.")
             return
 
@@ -1619,8 +1661,7 @@ class App(tk.Tk):
         def work():
             try:
                 env = self._make_env()
-                exec_cmd = [
-                    sys.executable, str(EXEC),
+                exec_cmd = self._build_exec_cmd([
                     "--run-dir", str(GENERATED),  # executor can search inside generated_configs
                     "--use-epos",
                     "--no-pitaya",
@@ -1629,7 +1670,7 @@ class App(tk.Tk):
                     "--epos-jog-rpm", str(rpm),
                     "--epos-jog-seconds", str(secs),
                     "--rpm-limit", str(rpm_limit),
-                ]
+                ])
                 # jog is ALWAYS real hardware; if you want simulate jog, use plan_only mode
                 rc = self._run_cmd_stream(exec_cmd, env, interactive=False)
                 self.log(f"\n[Jog finished: rc={rc}]\n")
@@ -1654,7 +1695,7 @@ class App(tk.Tk):
             messagebox.showwarning("Busy", "Already running.")
             return
 
-        if not GEN.exists() or not EXEC.exists():
+        if (not IS_FROZEN) and ((not GEN.exists()) or (not EXEC.exists())):
             messagebox.showerror("Missing files", "gen_config.py or executor.py not found in repo root.")
             return
 
@@ -1684,6 +1725,7 @@ class App(tk.Tk):
                 pressure_v_max=self._parse_float(self.v_pressure_v_max.get(), "Pressure V max", -1e6),
                 pressure_p_min=self._parse_float(self.v_pressure_p_min.get(), "Pressure P min", -1e6),
                 pressure_p_max=self._parse_float(self.v_pressure_p_max.get(), "Pressure P max", -1e6),
+                osc_r_ohm=self._parse_float(self.v_osc_r_ohm.get(), "Instrument input R (ohm)", 1.0),
 
                 pitaya_enabled=pitaya_enabled,
                 epos_enabled=epos_enabled,
@@ -1726,8 +1768,7 @@ class App(tk.Tk):
                 env = self._make_env()
 
                 # 1) run generator
-                gen_cmd = [
-                    sys.executable, str(GEN),
+                gen_cmd = self._build_gen_cmd([
                     "--sample-name", ga.sample_name,
 
                     "--min-freq", str(ga.min_freq),
@@ -1747,9 +1788,10 @@ class App(tk.Tk):
                     "--pressure-v-max", str(ga.pressure_v_max),
                     "--pressure-p-min", str(ga.pressure_p_min),
                     "--pressure-p-max", str(ga.pressure_p_max),
+                    "--osc-r-ohm", str(ga.osc_r_ohm),
 
                     "--signal_hz_multiplier", str(ga.signal_hz_multiplier),
-                ]
+                ])
                 if ga.probe_10x:
                     gen_cmd.append("--probe-10x")
 
@@ -1790,7 +1832,7 @@ class App(tk.Tk):
                     self._log_epos_safety_envelope(run_dir=run_dir, rpm_limit=rpm_limit)
 
                 # 3) run executor based on mode
-                exec_cmd = [sys.executable, str(EXEC), "--run-dir", str(run_dir)]
+                exec_cmd = self._build_exec_cmd(["--run-dir", str(run_dir)])
 
                 # Always apply rpm safety limit when we might touch EPOS
                 # (plan_only is dry-run so it doesn't connect anyway, but clamp still documents intent)
@@ -1885,5 +1927,16 @@ class App(tk.Tk):
 # Entry
 # -----------------------------
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--run-gen-config", "--run-executor"):
+        cmd = sys.argv[1]
+        argv = sys.argv[2:]
+        if cmd == "--run-gen-config":
+            import gen_config
+            gen_config.main(argv)
+        else:
+            import executor
+            executor.main(argv)
+        raise SystemExit(0)
+
     app = App()
     app.mainloop()

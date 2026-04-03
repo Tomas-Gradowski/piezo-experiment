@@ -341,13 +341,13 @@ def execute_point(
             point.get("output_hz", point.get("motor_hz", point.get("signal_hz", 0.0)))
         )
         load_r = float(point.get("rbox_ohm", point.get("requested_r_ohm", 0.0)))
-        z_osc = float(osc_r_ohm)
-        if freq_hz > 0:
-            z_osc = math.sqrt((float(osc_r_ohm) ** 2) + (((1.0 / freq_hz) * 2.0 * math.pi * 10e-9) ** 2))
-        if load_r > 0 and z_osc > 0:
-            total_r = 1.0 / (1.0 / load_r + 1.0 / z_osc)
-        else:
-            total_r = max(z_osc, 1e-12)
+        total_r = float(point.get("total_r_ohm", 0.0))
+        if total_r <= 0.0:
+            z_osc = float(osc_r_ohm)
+            if load_r > 0 and z_osc > 0:
+                total_r = 1.0 / (1.0 / load_r + 1.0 / z_osc)
+            else:
+                total_r = max(z_osc, 1e-12)
 
         pressure = [(float(pressure_cal_a) * (p * probe_factor)) + float(pressure_cal_b) for p in ch1]
         voltage = [(float(voltage_cal_a) * (v * probe_factor)) + float(voltage_cal_b) for v in ch2]
@@ -457,7 +457,7 @@ def _query_waveform_with_retry(
 # CLI
 # -----------------------------
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Execute measurement_plan.json on Red Pitaya and export CSV waveforms.")
     ap.add_argument("--run-dir", required=True, help="Folder containing experiment_config.json + measurement_plan.json")
     ap.add_argument("--csv-dirname", default="csv", help="Where to write csv outputs inside run-dir")
@@ -488,11 +488,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--epos-jog-rpm", type=int, default=30, help="Output rpm for manual jog")
     ap.add_argument("--epos-jog-seconds", type=float, default=2.0, help="How long to jog")
     ap.add_argument("--rpm-limit", type=int, default=5000, help="Hard safety cap ")
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: List[str] | None = None) -> None:
+    args = parse_args(argv)
 
     run_dir = resolve_run_dir(Path(args.run_dir).expanduser().resolve())
     cfg = load_json(run_dir / "experiment_config.json")
